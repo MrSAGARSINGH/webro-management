@@ -1,0 +1,524 @@
+
+/* ==========================================
+   WEBRO MANAGEMENT — GLOBAL DESIGN SYSTEM
+========================================== */
+
+// ================= COLORS =================
+
+$bg: #09090b;
+$surface: #18181b;
+$surface-hover: #222225;
+$border: #2a2a2e;
+
+$text: #fafafa;
+$muted: #a1a1aa;
+
+$primary: #a3e635;
+$primary-hover: #bef264;
+
+$success: #22c55e;
+$warning: #f59e0b;
+$danger: #ef4444;
+
+// ================= CSS VARIABLES =================
+
+:root {
+  color-scheme: dark;
+
+  --bg: #{$bg};
+  --surface: #{$surface};
+  --surface-hover: #{$surface-hover};
+  --border: #{$border};
+
+  --text: #{$text};
+  --muted: #{$muted};
+
+  --primary: #{$primary};
+  --primary-hover: #{$primary-hover};
+
+  --success: #{$success};
+  --warning: #{$warning};
+  --danger: #{$danger};
+
+  --radius: 12px;
+  --sidebar-width: 260px;
+}
+
+// ================= RESET =================
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+
+  background: var(--bg);
+  color: var(--text);
+
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: var(--primary);
+  color: #09090b;
+}
+
+// ================= SCROLLBAR =================
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 10px;
+
+  &:hover {
+    background: #52525b;
+  }
+}
+
+// ================= COMMON CARD =================
+
+.card {
+  padding: 24px;
+
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+
+  background: var(--surface);
+
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease;
+
+  &:hover {
+    border-color: #3f3f46;
+  }
+}
+
+// ================= BUTTONS =================
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  min-height: 42px;
+  padding: 10px 18px;
+
+  border: 1px solid transparent;
+  border-radius: 9px;
+
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+
+  cursor: pointer;
+
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
+
+  &--primary {
+    background: var(--primary);
+    color: #09090b;
+
+    &:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+  }
+
+  &--secondary {
+    border-color: var(--border);
+    background: var(--surface);
+    color: var(--text);
+
+    &:hover:not(:disabled) {
+      background: var(--surface-hover);
+    }
+  }
+
+  &--danger {
+    background: var(--danger);
+    color: #fff;
+
+    &:hover:not(:disabled) {
+      background: #dc2626;
+    }
+  }
+}
+
+// ================= FORM FIELDS =================
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 11px 14px;
+
+  border: 1px solid var(--border);
+  border-radius: 9px;
+
+  background: var(--surface);
+  color: var(--text);
+
+  outline: none;
+
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+
+  &::placeholder {
+    color: var(--muted);
+  }
+
+  &:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(163, 230, 53, 0.08);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+// ================= TABLES =================
+
+.table-wrapper {
+  width: 100%;
+  max-width: 100%;
+
+  overflow-x: auto;
+
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+
+  -webkit-overflow-scrolling: touch;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+
+  th,
+  td {
+    padding: 15px 18px;
+
+    border-bottom: 1px solid var(--border);
+
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  th {
+    background: #202024;
+    color: var(--muted);
+
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  td {
+    color: var(--text);
+  }
+
+  tbody tr {
+    transition: background 0.2s ease;
+
+    &:hover {
+      background: var(--surface-hover);
+    }
+
+    &:last-child td {
+      border-bottom: 0;
+    }
+  }
+}
+
+// ================= STATUS BADGES =================
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 5px 10px;
+
+  border-radius: 6px;
+
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+
+  &--success {
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
+  }
+
+  &--pending {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fbbf24;
+  }
+
+  &--danger {
+    background: rgba(239, 68, 68, 0.12);
+    color: #f87171;
+  }
+}
+
+// ================= TYPOGRAPHY =================
+
+.page-title {
+  margin: 0;
+
+  color: var(--text);
+
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 700;
+  letter-spacing: -0.8px;
+  line-height: 1.25;
+}
+
+.text-muted {
+  color: var(--muted);
+}
+
+.text-primary {
+  color: var(--primary);
+}
+
+// ==========================================
+// WEBRO APP LAYOUT
+// ==========================================
+
+.webro-app {
+  --current-sidebar-width: 260px;
+
+  position: relative;
+  display: block;
+
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+
+  background: var(--bg);
+  color: var(--text);
+
+  // ================= MAIN AREA =================
+
+  &__main {
+    display: flex;
+    flex-direction: column;
+
+    width: calc(100% - var(--current-sidebar-width));
+    min-width: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+
+    margin-left: var(--current-sidebar-width);
+
+    transition:
+      width 0.25s ease,
+      margin-left 0.25s ease;
+  }
+
+  // ================= PAGE CONTENT =================
+
+  &__content {
+    flex: 1;
+
+    width: 100%;
+    min-width: 0;
+    max-width: 1800px;
+
+    margin: 0 auto;
+    padding: 24px;
+
+    > * {
+      min-width: 0;
+    }
+  }
+}
+
+// ==========================================
+// COMING SOON
+// ==========================================
+
+.webro-coming-soon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  min-height: 55vh;
+  padding: 24px;
+
+  text-align: center;
+
+  h1 {
+    margin: 0 0 12px;
+
+    color: var(--text);
+
+    font-size: 26px;
+    font-weight: 750;
+    letter-spacing: -0.5px;
+  }
+
+  p {
+    margin: 0;
+
+    color: var(--muted);
+
+    font-size: 14px;
+    line-height: 1.6;
+  }
+}
+
+// ==========================================
+// RESPONSIVE — TABLET
+// ==========================================
+
+@media (max-width: 900px) {
+  .webro-app {
+    &__main {
+      width: 100%;
+      margin-left: 0;
+    }
+
+    &__content {
+      padding: 20px;
+    }
+  }
+}
+
+// ==========================================
+// RESPONSIVE — MOBILE
+// ==========================================
+
+@media (max-width: 768px) {
+  .card {
+    padding: 16px;
+  }
+
+  .table {
+    min-width: 650px;
+  }
+
+  .page-title {
+    font-size: 22px;
+  }
+}
+
+@media (max-width: 480px) {
+  .webro-app {
+    &__content {
+      padding: 16px;
+    }
+  }
+
+  .webro-coming-soon {
+    min-height: 45vh;
+    padding: 16px;
+
+    h1 {
+      font-size: 22px;
+    }
+
+    p {
+      font-size: 13px;
+    }
+  }
+
+  .btn {
+    padding: 10px 14px;
+  }
+}
+
+// ==========================================
+// ACCESSIBILITY — REDUCED MOTION
+// ==========================================
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .webro-app__main,
+  .card,
+  .btn,
+  .input,
+  .select,
+  .textarea,
+  .table tbody tr {
+    transition: none;
+  }
+}

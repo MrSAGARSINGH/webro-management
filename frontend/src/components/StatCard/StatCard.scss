@@ -1,0 +1,387 @@
+
+/* ==========================================
+   WEBRO MANAGEMENT — STAT CARD
+========================================== */
+
+.stat-card {
+  position: relative;
+
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 20px;
+
+  width: 100%;
+  min-width: 0;
+  min-height: 155px;
+
+  padding: 22px;
+
+  border: 1px solid var(--border);
+  border-radius: 15px;
+
+  background: var(--surface);
+  color: var(--text);
+
+  text-align: left;
+  overflow: hidden;
+
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+
+  // ================= TOP ACCENT =================
+
+  &::before {
+    content: "";
+
+    position: absolute;
+    top: 0;
+    left: 18px;
+    right: 18px;
+
+    height: 1px;
+
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.08),
+      transparent
+    );
+
+    pointer-events: none;
+  }
+
+  &:hover {
+    border-color: #3f3f46;
+    background: #1d1d20;
+  }
+
+  // ================= TOP SECTION =================
+
+  &__top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  &__heading {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__label {
+    display: block;
+
+    color: var(--muted);
+
+    font-size: 12px;
+    font-weight: 550;
+    line-height: 1.5;
+    letter-spacing: 0.1px;
+
+    overflow-wrap: anywhere;
+  }
+
+  &__icon {
+    display: grid;
+    place-items: center;
+
+    width: 43px;
+    height: 43px;
+    flex-shrink: 0;
+
+    border: 1px solid rgba(163, 230, 53, 0.12);
+    border-radius: 12px;
+
+    background: rgba(163, 230, 53, 0.09);
+    color: var(--primary);
+
+    svg {
+      display: block;
+    }
+  }
+
+  // ================= VALUE =================
+
+  &__value {
+    color: var(--text);
+
+    font-size: clamp(23px, 2.1vw, 32px);
+    font-weight: 750;
+    line-height: 1.2;
+    letter-spacing: -1px;
+
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+
+  // ================= BOTTOM SECTION =================
+
+  &__bottom {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 7px;
+
+    min-width: 0;
+    min-height: 22px;
+  }
+
+  &__change-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    min-width: 0;
+  }
+
+  &__trend {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+
+    padding: 4px 7px;
+
+    border-radius: 6px;
+
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.3;
+
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+
+    &--up {
+      background: rgba(34, 197, 94, 0.1);
+      color: #4ade80;
+    }
+
+    &--down {
+      background: rgba(239, 68, 68, 0.1);
+      color: #f87171;
+    }
+
+    &--neutral {
+      background: rgba(161, 161, 170, 0.1);
+      color: var(--muted);
+    }
+  }
+
+  &__change-label {
+    color: var(--muted);
+
+    font-size: 10px;
+    line-height: 1.5;
+
+    overflow-wrap: anywhere;
+  }
+
+  &__description {
+    display: block;
+
+    color: var(--muted);
+
+    font-size: 11px;
+    line-height: 1.5;
+
+    overflow-wrap: anywhere;
+  }
+
+  // ================= PRIMARY VARIANT =================
+
+  &--primary {
+    border-color: rgba(163, 230, 53, 0.24);
+
+    background: linear-gradient(
+      145deg,
+      rgba(163, 230, 53, 0.08),
+      var(--surface) 70%
+    );
+
+    &::before {
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(163, 230, 53, 0.3),
+        transparent
+      );
+    }
+
+    &:hover {
+      border-color: rgba(163, 230, 53, 0.4);
+
+      background: linear-gradient(
+        145deg,
+        rgba(163, 230, 53, 0.12),
+        #1d1d20 70%
+      );
+    }
+
+    .stat-card__icon {
+      background: rgba(163, 230, 53, 0.12);
+      border-color: rgba(163, 230, 53, 0.2);
+    }
+  }
+
+  // ================= WARNING VARIANT =================
+
+  &--warning {
+    .stat-card__icon {
+      background: rgba(245, 158, 11, 0.1);
+      border-color: rgba(245, 158, 11, 0.15);
+      color: var(--warning);
+    }
+  }
+
+  // ================= DANGER VARIANT =================
+
+  &--danger {
+    .stat-card__icon {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+    }
+  }
+
+  // ================= CLICKABLE =================
+
+  &--clickable {
+    cursor: pointer;
+    appearance: none;
+
+    &:hover:not(:disabled) {
+      transform: translateY(-2px);
+
+      box-shadow:
+        0 12px 28px rgba(0, 0, 0, 0.18);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 3px;
+    }
+  }
+
+  // ================= LOADING =================
+
+  &__skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__skeleton-value,
+  &__skeleton-text {
+    display: block;
+
+    border-radius: 6px;
+
+    background: linear-gradient(
+      90deg,
+      #27272a 25%,
+      #3f3f46 50%,
+      #27272a 75%
+    );
+
+    background-size: 200% 100%;
+
+    animation: statCardShimmer 1.5s ease-in-out infinite;
+  }
+
+  &__skeleton-value {
+    width: 65%;
+    height: 32px;
+  }
+
+  &__skeleton-text {
+    width: 45%;
+    height: 13px;
+  }
+
+  &--loading {
+    pointer-events: none;
+  }
+}
+
+// ==========================================
+// SKELETON ANIMATION
+// ==========================================
+
+@keyframes statCardShimmer {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+// ==========================================
+// RESPONSIVE — TABLET
+// ==========================================
+
+@media (max-width: 768px) {
+  .stat-card {
+    min-height: 145px;
+    padding: 18px;
+    gap: 17px;
+
+    &__value {
+      font-size: 26px;
+    }
+
+    &__icon {
+      width: 39px;
+      height: 39px;
+    }
+  }
+}
+
+// ==========================================
+// RESPONSIVE — MOBILE
+// ==========================================
+
+@media (max-width: 480px) {
+  .stat-card {
+    min-height: 130px;
+    padding: 16px;
+    gap: 15px;
+
+    &__value {
+      font-size: 25px;
+    }
+
+    &__label {
+      font-size: 11px;
+    }
+
+    &__description {
+      font-size: 10px;
+    }
+
+    &__icon {
+      width: 38px;
+      height: 38px;
+    }
+  }
+}
+
+// ==========================================
+// ACCESSIBILITY
+// ==========================================
+
+@media (prefers-reduced-motion: reduce) {
+  .stat-card,
+  .stat-card__skeleton-value,
+  .stat-card__skeleton-text {
+    animation: none;
+    transition: none;
+  }
+}
