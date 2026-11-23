@@ -1,6 +1,7 @@
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+
 import {
   UsersRound,
   IndianRupee,
@@ -12,7 +13,6 @@ import {
   ArrowRight,
   Plus,
   CheckCircle2,
-  Clock3,
   AlertCircle,
   CalendarDays,
   ListTodo,
@@ -24,131 +24,26 @@ import {
 
 import StatCard from "../../components/StatCard/StatCard";
 import RevenueChart from "../../components/RevenueChart/RevenueChart";
+
 import "./Dashboard.scss";
 
 // ==========================================
-// DEMO DATA — REPLACE WITH API DATA LATER
+// API CONFIGURATION
 // ==========================================
 
-const dashboardStats = {
-  totalClients: 24,
-  totalRevenue: 320000,
-  receivedPayments: 235000,
-  pendingPayments: 85000,
-  activeProjects: 12,
-  todayCalls: 8,
-  pendingFollowUps: 5,
-  completedTasks: 18,
-};
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
-const followUps = [
-  {
-    id: "FU-001",
-    client: "Maple & Thyme",
-    contact: "Website project discussion",
-    time: "10:30 AM",
-    type: "Call",
-    status: "Pending",
-    priority: "High",
-  },
-  {
-    id: "FU-002",
-    client: "Koala Caff",
-    contact: "Payment follow-up",
-    time: "12:00 PM",
-    type: "Payment",
-    status: "Pending",
-    priority: "High",
-  },
-  {
-    id: "FU-003",
-    client: "Dihara",
-    contact: "Product page approval",
-    time: "02:30 PM",
-    type: "Meeting",
-    status: "Scheduled",
-    priority: "Medium",
-  },
-  {
-    id: "FU-004",
-    client: "Om Banna Sa DTH",
-    contact: "Website maintenance",
-    time: "04:00 PM",
-    type: "Call",
-    status: "Completed",
-    priority: "Low",
-  },
-];
+const getNumber = (value) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value
+    : 0;
 
-const recentPayments = [
-  {
-    id: "PAY-001",
-    client: "Maple & Thyme",
-    project: "Restaurant Website",
-    amount: 15000,
-    date: "18 Nov 2026",
-    status: "Received",
-  },
-  {
-    id: "PAY-002",
-    client: "Koala Caff",
-    project: "Website Development",
-    amount: 12000,
-    date: "17 Nov 2026",
-    status: "Pending",
-  },
-  {
-    id: "PAY-003",
-    client: "Dihara",
-    project: "E-commerce Website",
-    amount: 25000,
-    date: "15 Nov 2026",
-    status: "Received",
-  },
-  {
-    id: "PAY-004",
-    client: "Om Banna Sa DTH",
-    project: "Business Website",
-    amount: 8000,
-    date: "12 Nov 2026",
-    status: "Partial",
-  },
-];
-
-const activeProjects = [
-  {
-    id: "PRJ-001",
-    name: "Maple & Thyme",
-    category: "Restaurant Website",
-    progress: 85,
-    status: "In Progress",
-    dueDate: "28 Nov 2026",
-  },
-  {
-    id: "PRJ-002",
-    name: "Dihara",
-    category: "E-commerce Development",
-    progress: 60,
-    status: "In Progress",
-    dueDate: "05 Dec 2026",
-  },
-  {
-    id: "PRJ-003",
-    name: "Koala Caff",
-    category: "Website Maintenance",
-    progress: 95,
-    status: "Review",
-    dueDate: "25 Nov 2026",
-  },
-  {
-    id: "PRJ-004",
-    name: "WEBRO NFC",
-    category: "Web Application",
-    progress: 40,
-    status: "In Progress",
-    dueDate: "10 Dec 2026",
-  },
-];
+// ==========================================
+// QUICK ACTIONS
+// ==========================================
 
 const quickActions = [
   {
@@ -177,18 +72,8 @@ const quickActions = [
   },
 ];
 
-const formatCurrency = (amount) =>
-  new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 0,
-  }).format(amount);
-
-const getStatusClass = (status) =>
-  status.toLowerCase().replace(/\s+/g, "-");
-
 // ==========================================
-// REUSABLE SECTION HEADER
+// SECTION HEADER
 // ==========================================
 
 function SectionHeader({
@@ -214,7 +99,10 @@ function SectionHeader({
       </div>
 
       {path && (
-        <Link to={path} className="dashboard__view-all">
+        <Link
+          to={path}
+          className="dashboard__view-all"
+        >
           {linkText}
           <ArrowUpRight size={16} />
         </Link>
@@ -224,90 +112,7 @@ function SectionHeader({
 }
 
 // ==========================================
-// STATUS BADGE
-// ==========================================
-
-function StatusBadge({ status }) {
-  return (
-    <span
-      className={`dashboard__status dashboard__status--${getStatusClass(
-        status
-      )}`}
-    >
-      {status}
-    </span>
-  );
-}
-
-// ==========================================
-// FOLLOW-UPS SECTION
-// ==========================================
-
-function FollowUpsSection() {
-  return (
-    <section className="dashboard__panel">
-      <SectionHeader
-        title="Today's Follow-ups"
-        subtitle="Client calls and scheduled activities"
-        path="/follow-ups"
-        icon={CalendarClock}
-      />
-
-      <div className="dashboard__followups">
-        {followUps.length === 0 ? (
-          <div className="dashboard__empty">
-            No follow-ups scheduled.
-          </div>
-        ) : (
-          followUps.map((item) => (
-            <div
-              className="dashboard__followup"
-              key={item.id}
-            >
-              <div className="dashboard__followup-icon">
-                {item.status === "Completed" ? (
-                  <CheckCircle2 size={19} />
-                ) : item.priority === "High" ? (
-                  <AlertCircle size={19} />
-                ) : (
-                  <PhoneCall size={19} />
-                )}
-              </div>
-
-              <div className="dashboard__followup-info">
-                <div className="dashboard__followup-title">
-                  <h3>{item.client}</h3>
-
-                  {item.priority === "High" && (
-                    <span className="dashboard__priority">
-                      High Priority
-                    </span>
-                  )}
-                </div>
-
-                <p>{item.contact}</p>
-
-                <div className="dashboard__followup-meta">
-                  <span>
-                    <Clock3 size={13} />
-                    {item.time}
-                  </span>
-
-                  <span>{item.type}</span>
-                </div>
-              </div>
-
-              <StatusBadge status={item.status} />
-            </div>
-          ))
-        )}
-      </div>
-    </section>
-  );
-}
-
-// ==========================================
-// QUICK ACTIONS
+// QUICK ACTIONS SECTION
 // ==========================================
 
 function QuickActionsSection() {
@@ -321,7 +126,12 @@ function QuickActionsSection() {
 
       <div className="dashboard__quick-actions">
         {quickActions.map(
-          ({ label, description, path, icon: Icon }) => (
+          ({
+            label,
+            description,
+            path,
+            icon: Icon,
+          }) => (
             <Link
               to={path}
               key={label}
@@ -361,7 +171,223 @@ function QuickActionsSection() {
 }
 
 // ==========================================
-// RECENT PAYMENTS
+// FOLLOW-UPS SECTION
+// ==========================================
+
+function FollowUpsSection() {
+  return (
+    <section className="dashboard__panel">
+      <SectionHeader
+        title="Today's Follow-ups"
+        subtitle="Client calls and scheduled activities"
+        path="/follow-ups"
+        icon={CalendarClock}
+      />
+
+      <div className="dashboard__followups">
+        <div className="dashboard__empty">
+          Follow-up records are not connected yet.
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ==========================================
+// ACTIVE PROJECTS SECTION
+// ==========================================
+
+
+function ActiveProjectsSection() {
+  const [projects, setProjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const fetchProjects = async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const response = await fetch(
+          `${API_URL}/projects?page=1&limit=10`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              Accept: "application/json",
+            },
+            signal: controller.signal,
+          }
+        );
+
+        if (response.status === 401) {
+          throw new Error("Session expired. Please sign in again.");
+        }
+
+        if (response.status === 403) {
+          throw new Error("You do not have access to project records.");
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch projects (${response.status})`);
+        }
+
+        const result = await response.json();
+
+        if (
+          result?.success !== true ||
+          !Array.isArray(result.projects)
+        ) {
+          throw new Error("Invalid projects API response");
+        }
+
+        if (!controller.signal.aborted) {
+          setProjects(result.projects);
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+
+        setProjects([]);
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load projects"
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchProjects();
+
+    return () => controller.abort();
+  }, []);
+
+  const activeProjects = projects.filter((project) => {
+    const status = String(project.status ?? "")
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+
+    return ["active", "inprogress"].includes(status);
+  });
+
+  return (
+    <section className="dashboard__panel">
+      <SectionHeader
+        title="Active Projects"
+        subtitle="Current project delivery progress"
+        path="/projects"
+        icon={FolderKanban}
+      />
+
+      <div className="dashboard__projects">
+        {loading ? (
+          <div className="dashboard__empty">
+            Loading projects...
+          </div>
+        ) : error ? (
+          <div className="dashboard__empty" role="alert">
+            {error}
+          </div>
+        ) : activeProjects.length === 0 ? (
+          <div className="dashboard__empty">
+            No active projects found.
+          </div>
+        ) : (
+          activeProjects.map((project) => {
+            const id = project._id ?? project.id;
+            const name =
+              project.name ?? project.title ?? "Untitled Project";
+
+            const status = String(project.status ?? "Active");
+
+            const progress =
+              typeof project.progress === "number" &&
+              Number.isFinite(project.progress)
+                ? Math.min(100, Math.max(0, project.progress))
+                : null;
+
+            const dueDate =
+              project.dueDate ?? project.deadline ?? null;
+
+            const formattedDate =
+              dueDate && !Number.isNaN(new Date(dueDate).getTime())
+                ? new Intl.DateTimeFormat("en-IN", {
+                    day: "2-digit",
+                    month: "short",
+                    year: "numeric",
+                  }).format(new Date(dueDate))
+                : null;
+
+            return (
+              <div
+                className="dashboard__project"
+                key={id}
+              >
+                <div className="dashboard__project-top">
+                  <div>
+                    <h3>{name}</h3>
+                    <p>{project.category ?? "Project"}</p>
+                  </div>
+
+                  <span className="dashboard__status">
+                    {status}
+                  </span>
+                </div>
+
+                {progress !== null && (
+                  <div className="dashboard__project-progress">
+                    <div className="dashboard__project-progress-info">
+                      <span>Progress</span>
+                      <strong>{progress}%</strong>
+                    </div>
+
+                    <div
+                      className="dashboard__progress-track"
+                      role="progressbar"
+                      aria-label={`${name} progress`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={progress}
+                    >
+                      <div
+                        className="dashboard__progress-fill"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="dashboard__project-footer">
+                  <span>
+                    <CalendarDays size={14} />
+                    {formattedDate
+                      ? `Due: ${formattedDate}`
+                      : "No due date"}
+                  </span>
+
+                  <Link to="/projects">
+                    Details
+                    <ArrowRight size={14} />
+                  </Link>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
+
+// ==========================================
+// RECENT PAYMENTS SECTION
 // ==========================================
 
 function RecentPaymentsSection() {
@@ -387,102 +413,13 @@ function RecentPaymentsSection() {
           </thead>
 
           <tbody>
-            {recentPayments.map((payment) => (
-              <tr key={payment.id}>
-                <td>
-                  <strong>{payment.client}</strong>
-                </td>
-
-                <td>{payment.project}</td>
-
-                <td className="dashboard__amount">
-                  {formatCurrency(payment.amount)}
-                </td>
-
-                <td>{payment.date}</td>
-
-                <td>
-                  <StatusBadge status={payment.status} />
-                </td>
-              </tr>
-            ))}
+            <tr>
+              <td colSpan={5}>
+                Payment records are not connected yet.
+              </td>
+            </tr>
           </tbody>
         </table>
-      </div>
-    </section>
-  );
-}
-
-// ==========================================
-// ACTIVE PROJECTS
-// ==========================================
-
-function ActiveProjectsSection() {
-  return (
-    <section className="dashboard__panel">
-      <SectionHeader
-        title="Active Projects"
-        subtitle="Current project delivery progress"
-        path="/projects"
-        icon={FolderKanban}
-      />
-
-      <div className="dashboard__projects">
-        {activeProjects.map((project) => {
-          const progress = Math.min(
-            100,
-            Math.max(0, project.progress)
-          );
-
-          return (
-            <div
-              className="dashboard__project"
-              key={project.id}
-            >
-              <div className="dashboard__project-top">
-                <div>
-                  <h3>{project.name}</h3>
-                  <p>{project.category}</p>
-                </div>
-
-                <StatusBadge status={project.status} />
-              </div>
-
-              <div className="dashboard__project-progress">
-                <div className="dashboard__project-progress-info">
-                  <span>Progress</span>
-                  <strong>{progress}%</strong>
-                </div>
-
-                <div
-                  className="dashboard__progress-track"
-                  role="progressbar"
-                  aria-label={`${project.name} progress`}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={progress}
-                >
-                  <div
-                    className="dashboard__progress-fill"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              </div>
-
-              <div className="dashboard__project-footer">
-                <span>
-                  <CalendarDays size={14} />
-                  Due: {project.dueDate}
-                </span>
-
-                <Link to="/projects">
-                  Details
-                  <ArrowRight size={14} />
-                </Link>
-              </div>
-            </div>
-          );
-        })}
       </div>
     </section>
   );
@@ -493,6 +430,136 @@ function ActiveProjectsSection() {
 // ==========================================
 
 export default function Dashboard() {
+  const [overview, setOverview] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // ========================================
+  // FETCH DASHBOARD OVERVIEW
+  // ========================================
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const fetchDashboard = async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const response = await fetch(
+          `${API_URL}/dashboard/overview`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              Accept: "application/json",
+            },
+            signal: controller.signal,
+          }
+        );
+
+        if (response.status === 401) {
+          throw new Error(
+            "Session expired. Please sign in again."
+          );
+        }
+
+        if (response.status === 403) {
+          throw new Error(
+            "You do not have permission to view dashboard analytics."
+          );
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            `Dashboard API failed (${response.status})`
+          );
+        }
+
+        const result = await response.json();
+
+        if (
+          result?.success !== true ||
+          !result.data ||
+          typeof result.data !== "object" ||
+          Array.isArray(result.data)
+        ) {
+          throw new Error(
+            "Invalid dashboard API response"
+          );
+        }
+
+        if (!controller.signal.aborted) {
+          setOverview(result.data);
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+
+        setOverview(null);
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load dashboard"
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchDashboard();
+
+    return () => controller.abort();
+  }, [reloadKey]);
+
+  // ========================================
+  // LIVE BUSINESS METRICS
+  // ========================================
+
+  const dashboardStats = useMemo(
+    () => ({
+      receivedRevenue: getNumber(
+        overview?.finance?.revenue
+      ),
+
+      outstandingInvoices: getNumber(
+        overview?.invoices?.outstanding
+      ),
+
+      totalClients: getNumber(
+        overview?.clients?.total
+      ),
+
+      activeProjects: getNumber(
+        overview?.projects?.active
+      ),
+
+      totalLeads: getNumber(
+        overview?.leads?.total
+      ),
+
+      activeEmployees: getNumber(
+        overview?.employees?.active
+      ),
+
+      overdueInvoices: getNumber(
+        overview?.invoices?.overdue
+      ),
+
+      completedTasks: getNumber(
+        overview?.tasks?.completed
+      ),
+    }),
+    [overview]
+  );
+
+  // ========================================
+  // CURRENT DATE
+  // ========================================
+
   const today = useMemo(
     () =>
       new Intl.DateTimeFormat("en-IN", {
@@ -503,6 +570,10 @@ export default function Dashboard() {
       }).format(new Date()),
     []
   );
+
+  // ========================================
+  // RENDER
+  // ========================================
 
   return (
     <div className="dashboard">
@@ -517,7 +588,9 @@ export default function Dashboard() {
 
           <h1>
             Business Overview
-            <span className="dashboard__title-accent">.</span>
+            <span className="dashboard__title-accent">
+              .
+            </span>
           </h1>
 
           <p>
@@ -542,18 +615,51 @@ export default function Dashboard() {
         </Link>
       </section>
 
-      {/* ================= DEMO NOTICE ================= */}
+      {/* ================= API STATUS ================= */}
 
-      <div
-        className="dashboard__demo-notice"
-        role="status"
-      >
-        <AlertCircle size={17} />
-        <span>
-          Preview mode — dashboard values and records
-          are sample data, not live WEBRO business records.
-        </span>
-      </div>
+      {loading && (
+        <div
+          className="dashboard__demo-notice"
+          role="status"
+        >
+          <Activity size={17} />
+          Loading live dashboard data...
+        </div>
+      )}
+
+      {error && (
+        <div
+          className="dashboard__demo-notice"
+          role="alert"
+        >
+          <AlertCircle size={17} />
+
+          <span>{error}</span>
+
+          <button
+            type="button"
+            onClick={() =>
+              setReloadKey((previous) => previous + 1)
+            }
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && overview && (
+        <div
+          className="dashboard__demo-notice"
+          role="status"
+        >
+          <CheckCircle2 size={17} />
+
+          <span>
+            Live dashboard metrics connected to MongoDB.
+            Detailed records are being integrated.
+          </span>
+        </div>
+      )}
 
       {/* ================= STATS ================= */}
 
@@ -566,78 +672,80 @@ export default function Dashboard() {
             <span className="dashboard__section-kicker">
               PERFORMANCE
             </span>
+
             <h2>Key Metrics</h2>
           </div>
 
           <span className="dashboard__stats-period">
             <Activity size={14} />
-            Demo overview
+            Live overview
           </span>
         </div>
 
-        <div className="dashboard__stats">
-          <StatCard
-            title="Total Revenue"
-            value={dashboardStats.totalRevenue}
-            format="currency"
-            icon={IndianRupee}
-            variant="primary"
-            description="Total contracted revenue"
-          />
+        {!loading && !error && overview && (
+          <div className="dashboard__stats">
+            <StatCard
+              title="Received Revenue"
+              value={dashboardStats.receivedRevenue}
+              format="currency"
+              icon={IndianRupee}
+              variant="primary"
+              description="Completed payments collected"
+            />
 
-          <StatCard
-            title="Received Payments"
-            value={dashboardStats.receivedPayments}
-            format="currency"
-            icon={CheckCircle2}
-            description="Payments collected"
-          />
+            <StatCard
+              title="Outstanding Invoices"
+              value={dashboardStats.outstandingInvoices}
+              format="currency"
+              icon={Wallet}
+              variant="warning"
+              description="Unpaid invoice balance"
+            />
 
-          <StatCard
-            title="Pending Payments"
-            value={dashboardStats.pendingPayments}
-            format="currency"
-            icon={Wallet}
-            variant="warning"
-            description="Outstanding client payments"
-          />
+            <StatCard
+              title="Total Clients"
+              value={dashboardStats.totalClients}
+              icon={UsersRound}
+              description="Registered clients"
+            />
 
-          <StatCard
-            title="Total Clients"
-            value={dashboardStats.totalClients}
-            icon={UsersRound}
-            description="Registered clients"
-          />
+            <StatCard
+              title="Active Projects"
+              value={dashboardStats.activeProjects}
+              icon={FolderKanban}
+              description="Projects currently in progress"
+            />
 
-          <StatCard
-            title="Active Projects"
-            value={dashboardStats.activeProjects}
-            icon={FolderKanban}
-            description="Projects currently in progress"
-          />
+            <StatCard
+              title="Total Leads"
+              value={dashboardStats.totalLeads}
+              icon={UsersRound}
+              description="All sales leads"
+            />
 
-          <StatCard
-            title="Today's Calls"
-            value={dashboardStats.todayCalls}
-            icon={PhoneCall}
-            description="Scheduled client calls"
-          />
+            <StatCard
+              title="Active Employees"
+              value={dashboardStats.activeEmployees}
+              icon={UsersRound}
+              description="Currently active employees"
+            />
 
-          <StatCard
-            title="Pending Follow-ups"
-            value={dashboardStats.pendingFollowUps}
-            icon={CalendarClock}
-            variant="warning"
-            description="Follow-ups requiring attention"
-          />
+            <StatCard
+              title="Overdue Invoices"
+              value={dashboardStats.overdueInvoices}
+              icon={ReceiptText}
+              variant="warning"
+              description="Invoices past due"
+            />
 
-          <StatCard
-            title="Completed Tasks"
-            value={dashboardStats.completedTasks}
-            icon={ListTodo}
-            description="Tasks marked as completed"
-          />
-        </div>
+            <StatCard
+              title="Completed Tasks"
+              value={dashboardStats.completedTasks}
+              icon={ListTodo}
+              description="Tasks marked as completed"
+            />
+          </div>
+        )}
       </section>
 
       {/* ================= CHART + ACTIONS ================= */}

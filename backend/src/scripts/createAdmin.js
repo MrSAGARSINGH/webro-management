@@ -1,4 +1,4 @@
-
+import "../config/dns.js";
 import "dotenv/config";
 import mongoose from "mongoose";
 import { createInterface } from "node:readline/promises";

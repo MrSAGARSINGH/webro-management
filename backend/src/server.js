@@ -1,137 +1,205 @@
-
+import "./config/dns.js";
 import { env } from "./config/env.js";
 
 // ======================================
-// Start Express Application
+// WEBRO Management Backend
 // ======================================
 
-// Import the application only after
-// environment validation succeeds.
+// Load application only after environment
+// configuration has been validated.
 
-const { default: app } = await import("./app.js");
-
-let server;
+const [{ default: app }, { connectDB, disconnectDB }] =
+  await Promise.all([
+    import("./app.js"),
+    import("./config/db.js"),
+  ]);
 
 // ======================================
-// Start HTTP Server
+// Server State
 // ======================================
 
-const startServer = () => {
-  server = app.listen(env.PORT, () => {
-    console.log(
-      "\n=================================="
-    );
+let server = null;
+let isShuttingDown = false;
+let shutdownPromise = null;
 
-    console.log(
-      "WEBRO MANAGEMENT BACKEND"
-    );
+// ======================================
+// Server Configuration
+// ======================================
 
-    console.log(
-      "=================================="
-    );
+const configureServer = (httpServer) => {
+  httpServer.requestTimeout = 120_000;
+  httpServer.headersTimeout = 60_000;
+  httpServer.keepAliveTimeout = 5_000;
+};
 
-    console.log(
-      `Environment: ${env.NODE_ENV}`
-    );
+// ======================================
+// Close HTTP Server
+// ======================================
 
-    console.log(
-      `Server: http://localhost:${env.PORT}`
-    );
+const closeHTTPServer = async () => {
+  if (!server) return;
 
-    console.log(
-      `Health: http://localhost:${env.PORT}/api/health`
-    );
+  await new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error && error.code !== "ERR_SERVER_NOT_RUNNING") {
+        reject(error);
+        return;
+      }
 
-    console.log(
-      "==================================\n"
-    );
+      resolve();
+    });
+
+    server.closeIdleConnections?.();
   });
-
-  // ======================================
-  // Server Startup Errors
-  // ======================================
-
-  server.on("error", (error) => {
-    if (error.code === "EADDRINUSE") {
-      console.error(
-        `Port ${env.PORT} is already in use.`
-      );
-    } else if (error.code === "EACCES") {
-      console.error(
-        `Permission denied for port ${env.PORT}.`
-      );
-    } else {
-      console.error(
-        "Server startup failed:",
-        error
-      );
-    }
-
-    process.exitCode = 1;
-  });
-
-  // ======================================
-  // Server Timeout Configuration
-  // ======================================
-
-  server.requestTimeout = 120_000;
-  server.headersTimeout = 60_000;
-  server.keepAliveTimeout = 5_000;
 };
 
 // ======================================
 // Graceful Shutdown
 // ======================================
 
-let isShuttingDown = false;
+const shutdown = (signal, exitCode = 0) => {
+  if (shutdownPromise) {
+    if (exitCode !== 0) {
+      process.exitCode = 1;
+    }
 
-const shutdown = (signal) => {
-  if (isShuttingDown) {
-    return;
+    return shutdownPromise;
   }
 
   isShuttingDown = true;
+  process.exitCode = exitCode;
 
   console.log(
-    `\nReceived ${signal}. Shutting down...`
+    `\n[WEBRO] Received ${signal}. Shutting down...`
   );
 
-  if (!server || !server.listening) {
-    process.exit(0);
-  }
-
-  const forceShutdown = setTimeout(() => {
-    console.error(
-      "Graceful shutdown timed out."
-    );
-
-    server.closeAllConnections();
-
-    process.exit(1);
-  }, 10_000);
-
-  forceShutdown.unref();
-
-  server.close((error) => {
-    clearTimeout(forceShutdown);
-
-    if (error) {
+  shutdownPromise = (async () => {
+    const forceShutdown = setTimeout(() => {
       console.error(
-        "Server shutdown failed:",
+        "[WEBRO] Graceful shutdown timed out"
+      );
+
+      server?.closeAllConnections?.();
+      process.exit(1);
+    }, 10_000);
+
+    forceShutdown.unref();
+
+    try {
+      await closeHTTPServer();
+      await disconnectDB();
+
+      console.log(
+        "[WEBRO] Backend stopped successfully"
+      );
+    } catch (error) {
+      console.error(
+        "[WEBRO] Shutdown failed:",
         error
       );
 
-      process.exit(1);
+      process.exitCode = 1;
+    } finally {
+      clearTimeout(forceShutdown);
     }
+  })();
 
-    console.log(
-      "WEBRO backend stopped successfully."
-    );
+  return shutdownPromise;
+};
 
-    process.exit(0);
+// ======================================
+// Start HTTP Server
+// ======================================
+
+const listen = () =>
+  new Promise((resolve, reject) => {
+    const httpServer = app.listen(env.PORT);
+
+    server = httpServer;
+    configureServer(httpServer);
+
+    const onListening = () => {
+      httpServer.off("error", onStartupError);
+      resolve(httpServer);
+    };
+
+    const onStartupError = (error) => {
+      httpServer.off("listening", onListening);
+      reject(error);
+    };
+
+    httpServer.once("listening", onListening);
+    httpServer.once("error", onStartupError);
   });
 
-  server.closeIdleConnections();
+// ======================================
+// Start Backend
+// ======================================
+
+const startServer = async () => {
+  try {
+    console.log("[WEBRO] Connecting to MongoDB...");
+
+    // Do not accept HTTP requests until
+    // the database connection succeeds.
+
+    await connectDB();
+
+    if (isShuttingDown) return;
+
+    await listen();
+
+    if (isShuttingDown) return;
+
+    // Handle runtime HTTP server errors.
+
+    server.on("error", (error) => {
+      console.error(
+        "[WEBRO] HTTP server error:",
+        error
+      );
+
+      void shutdown("SERVER_ERROR", 1);
+    });
+
+    console.log(
+      "\n=================================="
+    );
+    console.log("WEBRO MANAGEMENT BACKEND");
+    console.log(
+      "=================================="
+    );
+    console.log(
+      `Environment: ${env.NODE_ENV}`
+    );
+    console.log("MongoDB: Connected");
+    console.log(
+      `Server: http://localhost:${env.PORT}`
+    );
+    console.log(
+      `Health: http://localhost:${env.PORT}/api/health`
+    );
+    console.log(
+      "==================================\n"
+    );
+  } catch (error) {
+    if (error.code === "EADDRINUSE") {
+      console.error(
+        `[WEBRO] Port ${env.PORT} is already in use`
+      );
+    } else if (error.code === "EACCES") {
+      console.error(
+        `[WEBRO] Permission denied for port ${env.PORT}`
+      );
+    } else {
+      console.error(
+        "[WEBRO] Backend startup failed:",
+        error.message
+      );
+    }
+
+    await shutdown("STARTUP_FAILURE", 1);
+  }
 };
 
 // ======================================
@@ -139,47 +207,41 @@ const shutdown = (signal) => {
 // ======================================
 
 process.on("SIGINT", () => {
-  shutdown("SIGINT");
+  void shutdown("SIGINT");
 });
 
 process.on("SIGTERM", () => {
-  shutdown("SIGTERM");
+  void shutdown("SIGTERM");
 });
 
 // ======================================
 // Unhandled Promise Rejections
 // ======================================
 
-process.on(
-  "unhandledRejection",
-  (reason) => {
-    console.error(
-      "Unhandled promise rejection:",
-      reason
-    );
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[WEBRO] Unhandled promise rejection:",
+    reason
+  );
 
-    shutdown("UNHANDLED_REJECTION");
-  }
-);
+  void shutdown("UNHANDLED_REJECTION", 1);
+});
 
 // ======================================
 // Uncaught Exceptions
 // ======================================
 
-process.on(
-  "uncaughtException",
-  (error) => {
-    console.error(
-      "Uncaught exception:",
-      error
-    );
+process.on("uncaughtException", (error) => {
+  console.error(
+    "[WEBRO] Uncaught exception:",
+    error
+  );
 
-    shutdown("UNCAUGHT_EXCEPTION");
-  }
-);
+  void shutdown("UNCAUGHT_EXCEPTION", 1);
+});
 
 // ======================================
 // Start Application
 // ======================================
 
-startServer();
+await startServer();

@@ -1,5 +1,5 @@
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 import {
   ResponsiveContainer,
@@ -9,39 +9,21 @@ import {
   XAxis,
   YAxis,
   Tooltip,
-  Legend,
 } from "recharts";
 
 import {
   TrendingUp,
   CalendarDays,
   BarChart3,
+  AlertCircle,
 } from "lucide-react";
 
 import "./RevenueChart.scss";
 
-// ==========================================
-// DEMO DATA
-// ==========================================
-
-const demoData = [
-  { month: "Jan", received: 35000, pending: 12000 },
-  { month: "Feb", received: 48000, pending: 18000 },
-  { month: "Mar", received: 42000, pending: 9000 },
-  { month: "Apr", received: 65000, pending: 22000 },
-  { month: "May", received: 57000, pending: 14000 },
-  { month: "Jun", received: 82000, pending: 25000 },
-  { month: "Jul", received: 74000, pending: 16000 },
-  { month: "Aug", received: 91000, pending: 28000 },
-  { month: "Sep", received: 86000, pending: 21000 },
-  { month: "Oct", received: 105000, pending: 30000 },
-  { month: "Nov", received: 98000, pending: 19000 },
-  { month: "Dec", received: 125000, pending: 35000 },
-];
-
-// ==========================================
-// FORMATTERS
-// ==========================================
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
 const currencyFormatter = new Intl.NumberFormat("en-IN", {
   style: "currency",
@@ -64,39 +46,19 @@ const formatAxis = (value) => {
   return String(value);
 };
 
-const normalizeAmount = (value) => {
-  if (value === null || value === undefined || value === "") {
-    return 0;
+const formatMonth = (month) => {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return month;
   }
 
-  const amount = Number(value);
+  const [year, monthNumber] = month.split("-").map(Number);
 
-  return Number.isFinite(amount)
-    ? Math.max(0, amount)
-    : 0;
+  return new Intl.DateTimeFormat("en-IN", {
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, monthNumber - 1, 1)));
 };
-
-const normalizeData = (data) => {
-  if (!Array.isArray(data)) return [];
-
-  return data
-    .filter(
-      (item) =>
-        item &&
-        typeof item === "object" &&
-        !Array.isArray(item)
-    )
-    .map((item) => ({
-      ...item,
-      month: String(item.month ?? ""),
-      received: normalizeAmount(item.received),
-      pending: normalizeAmount(item.pending),
-    }));
-};
-
-// ==========================================
-// TOOLTIP
-// ==========================================
 
 function RevenueTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
@@ -113,17 +75,12 @@ function RevenueTooltip({ active, payload, label }) {
           key={entry.dataKey}
         >
           <span className="revenue-chart__tooltip-name">
-            <span
-              className={`revenue-chart__dot revenue-chart__dot--${entry.dataKey}`}
-            />
-
-            {entry.dataKey === "received"
-              ? "Received"
-              : "Pending"}
+            <span className="revenue-chart__dot revenue-chart__dot--received" />
+            Received
           </span>
 
           <strong>
-            {formatCurrency(normalizeAmount(entry.value))}
+            {formatCurrency(entry.value ?? 0)}
           </strong>
         </div>
       ))}
@@ -131,44 +88,117 @@ function RevenueTooltip({ active, payload, label }) {
   );
 }
 
-// ==========================================
-// MAIN COMPONENT
-// ==========================================
-
-export default function RevenueChart({
-  data = demoData,
-  isDemo = true,
-}) {
-  const [view, setView] = useState("all");
+export default function RevenueChart() {
+  const [revenueData, setRevenueData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
 
   const uniqueId = useId().replace(/:/g, "");
-
   const receivedGradientId = `webro-received-${uniqueId}`;
-  const pendingGradientId = `webro-pending-${uniqueId}`;
 
-  const safeData = useMemo(
-    () => normalizeData(data),
-    [data]
-  );
+  useEffect(() => {
+    const controller = new AbortController();
 
-  const chartData = useMemo(
+    const fetchRevenue = async () => {
+      setLoading(true);
+      setError("");
+
+      try {
+        const response = await fetch(
+          `${API_URL}/dashboard/revenue`,
+          {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              Accept: "application/json",
+            },
+            signal: controller.signal,
+          }
+        );
+
+        if (response.status === 401) {
+          throw new Error(
+            "Session expired. Please sign in again."
+          );
+        }
+
+        if (response.status === 403) {
+          throw new Error(
+            "You do not have permission to view revenue analytics."
+          );
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            `Revenue API failed (${response.status})`
+          );
+        }
+
+        const result = await response.json();
+
+        if (
+          result?.success !== true ||
+          !Array.isArray(result?.data?.monthlyRevenue)
+        ) {
+          throw new Error("Invalid revenue API response");
+        }
+
+        const normalized = result.data.monthlyRevenue.map(
+          (item) => {
+            if (
+              typeof item?.month !== "string" ||
+              typeof item?.total !== "number" ||
+              !Number.isFinite(item.total) ||
+              item.total < 0
+            ) {
+              throw new Error(
+                "Invalid monthly revenue record"
+              );
+            }
+
+            return {
+              month: formatMonth(item.month),
+              received: item.total,
+            };
+          }
+        );
+
+        if (!controller.signal.aborted) {
+          setRevenueData(normalized);
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+
+        setRevenueData([]);
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load revenue analytics"
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchRevenue();
+
+    return () => controller.abort();
+  }, [retryKey]);
+
+  const totalReceived = useMemo(
     () =>
-      view === "six"
-        ? safeData.slice(-6)
-        : safeData,
-    [safeData, view]
-  );
-
-  const totals = useMemo(
-    () =>
-      chartData.reduce(
-        (result, item) => ({
-          received: result.received + item.received,
-          pending: result.pending + item.pending,
-        }),
-        { received: 0, pending: 0 }
+      revenueData.reduce(
+        (sum, item) => sum + item.received,
+        0
       ),
-    [chartData]
+    [revenueData]
+  );
+
+  const hasRevenue = revenueData.some(
+    (item) => item.received > 0
   );
 
   return (
@@ -176,7 +206,7 @@ export default function RevenueChart({
       className="revenue-chart"
       aria-label="Revenue overview"
     >
-      {/* ================= HEADER ================= */}
+      {/* HEADER */}
 
       <div className="revenue-chart__header">
         <div className="revenue-chart__heading">
@@ -189,8 +219,7 @@ export default function RevenueChart({
           </div>
 
           <p>
-            Received and pending client payments
-            {isDemo && " · Demo data"}
+            Received client payments · Live data
           </p>
         </div>
 
@@ -199,27 +228,13 @@ export default function RevenueChart({
           role="group"
           aria-label="Chart period"
         >
-          <button
-            type="button"
-            className={view === "six" ? "is-active" : ""}
-            onClick={() => setView("six")}
-            aria-pressed={view === "six"}
-          >
-            Last 6
-          </button>
-
-          <button
-            type="button"
-            className={view === "all" ? "is-active" : ""}
-            onClick={() => setView("all")}
-            aria-pressed={view === "all"}
-          >
-            All
-          </button>
+          <span className="is-active">
+            Last 6 Months
+          </span>
         </div>
       </div>
 
-      {/* ================= SUMMARY ================= */}
+      {/* SUMMARY */}
 
       <div className="revenue-chart__summary">
         <div className="revenue-chart__summary-item">
@@ -228,45 +243,70 @@ export default function RevenueChart({
             Total Received
           </span>
 
-          <strong>{formatCurrency(totals.received)}</strong>
-        </div>
-
-        <div className="revenue-chart__summary-item">
-          <span className="revenue-chart__summary-label">
-            <span className="revenue-chart__dot revenue-chart__dot--pending" />
-            Pending Payments
-          </span>
-
-          <strong>{formatCurrency(totals.pending)}</strong>
+          <strong>
+            {loading
+              ? "Loading..."
+              : error
+                ? "Unavailable"
+                : formatCurrency(totalReceived)}
+          </strong>
         </div>
       </div>
 
-      {/* ================= CHART META ================= */}
+      {/* META */}
 
       <div className="revenue-chart__meta">
         <span>
           <CalendarDays size={14} />
-          {view === "six"
-            ? "Last 6 records"
-            : "All records"}
+          Last 6 months · INR
         </span>
-
-        {isDemo && (
-          <span className="revenue-chart__demo-tag">
-            Demo
-          </span>
-        )}
       </div>
 
-      {/* ================= GRAPH ================= */}
+      {/* GRAPH */}
 
       <div className="revenue-chart__graph">
-        {chartData.length === 0 ? (
+        {loading ? (
+          <div
+            className="revenue-chart__empty"
+            role="status"
+          >
+            <BarChart3 size={30} />
+            <strong>Loading revenue analytics...</strong>
+          </div>
+        ) : error ? (
+          <div
+            className="revenue-chart__empty"
+            role="alert"
+          >
+            <AlertCircle size={30} />
+            <strong>Unable to load revenue</strong>
+            <span>{error}</span>
+
+            <button
+              type="button"
+              onClick={() =>
+                setRetryKey((value) => value + 1)
+              }
+            >
+              Retry
+            </button>
+          </div>
+        ) : revenueData.length === 0 ? (
           <div className="revenue-chart__empty">
             <BarChart3 size={30} />
             <strong>No revenue records</strong>
             <span>
-              Revenue data will appear here when available.
+              Monthly revenue data is not available.
+            </span>
+          </div>
+        ) : !hasRevenue ? (
+          <div className="revenue-chart__empty">
+            <BarChart3 size={30} />
+            <strong>No payments received yet</strong>
+            <span>
+              All reported months have zero revenue.
+              The chart will appear when payments
+              are recorded.
             </span>
           </div>
         ) : (
@@ -275,7 +315,7 @@ export default function RevenueChart({
             height="100%"
           >
             <AreaChart
-              data={chartData}
+              data={revenueData}
               margin={{
                 top: 15,
                 right: 10,
@@ -300,26 +340,6 @@ export default function RevenueChart({
                   <stop
                     offset="95%"
                     stopColor="#a3e635"
-                    stopOpacity={0}
-                  />
-                </linearGradient>
-
-                <linearGradient
-                  id={pendingGradientId}
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="1"
-                >
-                  <stop
-                    offset="0%"
-                    stopColor="#f59e0b"
-                    stopOpacity={0.14}
-                  />
-
-                  <stop
-                    offset="95%"
-                    stopColor="#f59e0b"
                     stopOpacity={0}
                   />
                 </linearGradient>
@@ -361,18 +381,6 @@ export default function RevenueChart({
                 }}
               />
 
-              <Legend
-                formatter={(value) =>
-                  value === "received"
-                    ? "Received"
-                    : "Pending"
-                }
-                wrapperStyle={{
-                  fontSize: "12px",
-                  paddingTop: "12px",
-                }}
-              />
-
               <Area
                 type="monotone"
                 dataKey="received"
@@ -380,17 +388,6 @@ export default function RevenueChart({
                 stroke="#a3e635"
                 strokeWidth={2.5}
                 fill={`url(#${receivedGradientId})`}
-                activeDot={{ r: 5 }}
-                isAnimationActive={false}
-              />
-
-              <Area
-                type="monotone"
-                dataKey="pending"
-                name="Pending"
-                stroke="#f59e0b"
-                strokeWidth={2}
-                fill={`url(#${pendingGradientId})`}
                 activeDot={{ r: 5 }}
                 isAnimationActive={false}
               />

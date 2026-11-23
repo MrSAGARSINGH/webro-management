@@ -1,15 +1,20 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Navigate,
   Route,
   Routes,
+  useLocation,
 } from "react-router-dom";
 
 // ================= COMPONENTS =================
 
 import Sidebar from "./components/Sidebar/Sidebar";
 import Header from "./components/Header/Header";
+
+// ================= AUTH =================
+
+import Login from "./pages/Login/Login";
 
 // ================= PAGES =================
 
@@ -31,17 +36,88 @@ import Settings from "./pages/Settings/Settings";
 
 import "./styles/global.scss";
 
+// ================= API CONFIG =================
+
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
+).replace(/\/+$/, "");
+
 // ================= APP =================
 
 export default function App() {
+  const location = useLocation();
+
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(false);
 
+  const [user, setUser] = useState(null);
+
+  const [authStatus, setAuthStatus] = useState("loading");
+
   const sidebarWidth = sidebarCollapsed
     ? "76px"
     : "260px";
+
+  // ================= SESSION CHECK =================
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const checkSession = async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/auth/me`,
+          {
+            method: "GET",
+            credentials: "include",
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+            },
+          }
+        );
+
+        if (response.status === 401) {
+          setUser(null);
+          setAuthStatus("unauthenticated");
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            "Unable to verify your session"
+          );
+        }
+
+        const data = await response.json();
+
+        if (!data.success || !data.user) {
+          throw new Error(
+            "Invalid session response"
+          );
+        }
+
+        setUser(data.user);
+        setAuthStatus("authenticated");
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        console.error(
+          "Session verification failed:",
+          error
+        );
+
+        setAuthStatus("error");
+      }
+    };
+
+    checkSession();
+
+    return () => controller.abort();
+  }, [location.pathname === "/login"]);
 
   // ================= SIDEBAR HANDLERS =================
 
@@ -57,118 +133,180 @@ export default function App() {
     setSidebarCollapsed((previous) => !previous);
   };
 
-  // ================= RENDER =================
+  // ================= LOADING =================
+
+  if (authStatus === "loading") {
+    return (
+      <div
+        role="status"
+        style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          background: "#f5f8f6",
+          color: "#087f5b",
+          fontFamily: "sans-serif",
+        }}
+      >
+        Verifying your session...
+      </div>
+    );
+  }
+
+  // ================= SESSION ERROR =================
+
+  if (authStatus === "error") {
+    return (
+      <div
+        role="alert"
+        style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          padding: "24px",
+          textAlign: "center",
+        }}
+      >
+        <div>
+          <h2>Unable to verify session</h2>
+          <p>
+            Check your backend connection and try again.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ================= LOGIN ROUTE =================
+
+  if (authStatus === "unauthenticated") {
+    return (
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="*"
+          element={<Navigate to="/login" replace />}
+        />
+      </Routes>
+    );
+  }
+
+  // ================= AUTHENTICATED APP =================
 
   return (
-    <div
-      className="webro-app"
-      style={{
-        "--current-sidebar-width": sidebarWidth,
-      }}
-    >
-      {/* ================= SIDEBAR ================= */}
-
-      <Sidebar
-        isOpen={sidebarOpen}
-        onClose={handleSidebarClose}
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={handleSidebarCollapse}
+    <Routes>
+      <Route
+        path="/login"
+        element={<Navigate to="/dashboard" replace />}
       />
 
-      {/* ================= MAIN CONTENT ================= */}
-
-      <div className="webro-app__main">
-        {/* ================= HEADER ================= */}
-
-        <Header onMenuClick={handleSidebarOpen} />
-
-        {/* ================= PAGE ROUTES ================= */}
-
-        <main className="webro-app__content">
-          <Routes>
-            {/* Dashboard */}
-            <Route
-              index
-              element={<Dashboard />}
+      <Route
+        path="/*"
+        element={
+          <div
+            className="webro-app"
+            style={{
+              "--current-sidebar-width": sidebarWidth,
+            }}
+          >
+            <Sidebar
+              isOpen={sidebarOpen}
+              onClose={handleSidebarClose}
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={handleSidebarCollapse}
             />
 
-            {/* CRM */}
-            <Route
-              path="leads"
-              element={<Leads />}
-            />
+            <div className="webro-app__main">
+              <Header onMenuClick={handleSidebarOpen} />
 
-            <Route
-              path="clients"
-              element={<Clients />}
-            />
+              <main className="webro-app__content">
+                <Routes>
+                  <Route
+                    index
+                    element={<Navigate to="/dashboard" replace />}
+                  />
 
-            <Route
-              path="calling"
-              element={<Calling />}
-            />
+                  <Route
+                    path="dashboard"
+                    element={<Dashboard />}
+                  />
 
-            <Route
-              path="follow-ups"
-              element={<FollowUps />}
-            />
+                  <Route
+                    path="leads"
+                    element={<Leads />}
+                  />
 
-            {/* Project Management */}
-            <Route
-              path="projects"
-              element={<Projects />}
-            />
+                  <Route
+                    path="clients"
+                    element={<Clients />}
+                  />
 
-            {/* Finance */}
-            <Route
-              path="payments"
-              element={<Payments />}
-            />
+                  <Route
+                    path="calling"
+                    element={<Calling />}
+                  />
 
-            <Route
-              path="invoices"
-              element={<Invoices />}
-            />
+                  <Route
+                    path="follow-ups"
+                    element={<FollowUps />}
+                  />
 
-            {/* Team Management */}
-            <Route
-              path="employees"
-              element={<Employees />}
-            />
+                  <Route
+                    path="projects"
+                    element={<Projects />}
+                  />
 
-            <Route
-              path="tasks"
-              element={<Tasks />}
-            />
+                  <Route
+                    path="payments"
+                    element={<Payments />}
+                  />
 
-            {/* Scheduling */}
-            <Route
-              path="calendar"
-              element={<Calendar />}
-            />
+                  <Route
+                    path="invoices"
+                    element={<Invoices />}
+                  />
 
-            {/* Analytics */}
-            <Route
-              path="reports"
-              element={<Reports />}
-            />
+                  <Route
+                    path="employees"
+                    element={<Employees />}
+                  />
 
-            {/* Workspace Settings */}
-            <Route
-              path="settings"
-              element={<Settings />}
-            />
+                  <Route
+                    path="tasks"
+                    element={<Tasks />}
+                  />
 
-            {/* Invalid Route */}
-            <Route
-              path="*"
-              element={
-                <Navigate to="/" replace />
-              }
-            />
-          </Routes>
-        </main>
-      </div>
-    </div>
+                  <Route
+                    path="calendar"
+                    element={<Calendar />}
+                  />
+
+                  <Route
+                    path="reports"
+                    element={<Reports />}
+                  />
+
+                  <Route
+                    path="settings"
+                    element={<Settings />}
+                  />
+
+                  <Route
+                    path="*"
+                    element={<Navigate to="/dashboard" replace />}
+                  />
+                </Routes>
+              </main>
+            </div>
+          </div>
+        }
+      />
+    </Routes>
   );
 }

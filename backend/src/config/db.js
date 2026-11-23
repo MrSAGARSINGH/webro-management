@@ -1,6 +1,5 @@
 
 import mongoose from "mongoose";
-
 import { env } from "./env.js";
 
 // ======================================
@@ -27,32 +26,24 @@ let disconnectPromise = null;
 let eventsRegistered = false;
 
 // ======================================
-// Register Connection Events
+// Register MongoDB Events
 // ======================================
 
 const registerConnectionEvents = () => {
-  if (eventsRegistered) {
-    return;
-  }
+  if (eventsRegistered) return;
 
   eventsRegistered = true;
 
   mongoose.connection.on("connected", () => {
-    console.log(
-      "[MongoDB] Connection established"
-    );
+    console.log("[MongoDB] Connection established");
   });
 
   mongoose.connection.on("disconnected", () => {
-    console.warn(
-      "[MongoDB] Connection disconnected"
-    );
+    console.warn("[MongoDB] Connection disconnected");
   });
 
   mongoose.connection.on("reconnected", () => {
-    console.log(
-      "[MongoDB] Connection restored"
-    );
+    console.log("[MongoDB] Connection restored");
   });
 
   mongoose.connection.on("error", (error) => {
@@ -74,23 +65,25 @@ export const connectDB = async () => {
     );
   }
 
+  // Wait if an existing connection
+  // is currently being disconnected.
+  if (disconnectPromise) {
+    await disconnectPromise;
+  }
+
+  // Reuse active connection.
   if (mongoose.connection.readyState === 1) {
     return mongoose.connection;
   }
 
   // Prevent duplicate connection attempts.
-
   if (connectionPromise) {
     return connectionPromise;
   }
 
-  if (disconnectPromise) {
-    await disconnectPromise;
-  }
-
   registerConnectionEvents();
 
-  connectionPromise = (async () => {
+  const pendingConnection = (async () => {
     try {
       await mongoose.connect(
         env.MONGODB_URI,
@@ -98,9 +91,7 @@ export const connectDB = async () => {
       );
 
       console.log(
-        `[MongoDB] Database: ${
-          mongoose.connection.name
-        }`
+        `[MongoDB] Database: ${mongoose.connection.name}`
       );
 
       return mongoose.connection;
@@ -110,9 +101,7 @@ export const connectDB = async () => {
         error.message
       );
 
-      // Clean up a failed connection
-      // before allowing another attempt.
-
+      // Clean up a failed connection attempt.
       try {
         await mongoose.disconnect();
       } catch (cleanupError) {
@@ -126,10 +115,14 @@ export const connectDB = async () => {
     }
   })();
 
+  connectionPromise = pendingConnection;
+
   try {
-    return await connectionPromise;
+    return await pendingConnection;
   } finally {
-    connectionPromise = null;
+    if (connectionPromise === pendingConnection) {
+      connectionPromise = null;
+    }
   }
 };
 
@@ -142,19 +135,17 @@ export const disconnectDB = async () => {
     return disconnectPromise;
   }
 
-  disconnectPromise = (async () => {
-    // Wait for any ongoing connection
-    // attempt before disconnecting.
-
+  const pendingDisconnect = (async () => {
+    // Wait for an ongoing connection attempt.
     if (connectionPromise) {
       try {
         await connectionPromise;
       } catch {
-        // Connection failure is already
-        // handled by connectDB.
+        // Connection errors are handled in connectDB.
       }
     }
 
+    // Already disconnected.
     if (mongoose.connection.readyState === 0) {
       return;
     }
@@ -166,15 +157,19 @@ export const disconnectDB = async () => {
     );
   })();
 
+  disconnectPromise = pendingDisconnect;
+
   try {
-    await disconnectPromise;
+    await pendingDisconnect;
   } finally {
-    disconnectPromise = null;
+    if (disconnectPromise === pendingDisconnect) {
+      disconnectPromise = null;
+    }
   }
 };
 
 // ======================================
-// Connection Status
+// Database Connection Status
 // ======================================
 
 export const getDBStatus = () => {

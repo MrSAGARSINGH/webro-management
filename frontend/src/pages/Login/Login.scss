@@ -1,0 +1,233 @@
+.webro-login {
+  --login-green: #087f5b;
+  --login-green-dark: #056747;
+
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  overflow: hidden;
+
+  background:
+    radial-gradient(
+      circle at 20% 15%,
+      rgba(26, 173, 117, 0.13),
+      transparent 35%
+    ),
+    radial-gradient(
+      circle at 85% 85%,
+      rgba(80, 190, 140, 0.12),
+      transparent 35%
+    ),
+    #f5f8f6;
+
+  font-family:
+    -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+
+  &,
+  * {
+    box-sizing: border-box;
+  }
+
+  &__glow {
+    position: absolute;
+    width: 420px;
+    height: 420px;
+    border-radius: 50%;
+    background: rgba(24, 170, 110, 0.12);
+    filter: blur(90px);
+    pointer-events: none;
+  }
+
+  &__card {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 440px;
+    padding: 44px 38px;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: 28px;
+
+    background: rgba(255, 255, 255, 0.76);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+
+    box-shadow:
+      0 24px 80px rgba(20, 70, 48, 0.08),
+      0 4px 16px rgba(20, 70, 48, 0.04);
+  }
+
+  &__brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #102c22;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 1.2px;
+  }
+
+  &__brand-mark {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    color: white;
+    background: var(--login-green);
+    font-size: 19px;
+  }
+
+  &__heading {
+    margin: 42px 0 32px;
+
+    h1 {
+      margin: 12px 0 8px;
+      color: #122b21;
+      font-size: clamp(28px, 5vw, 34px);
+      font-weight: 750;
+      letter-spacing: -1.3px;
+    }
+
+    p {
+      margin: 0;
+      color: #728078;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+  }
+
+  &__eyebrow {
+    color: var(--login-green);
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 2px;
+  }
+
+  &__field {
+    margin-bottom: 22px;
+
+    label {
+      display: block;
+      margin-bottom: 9px;
+      color: #31483c;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    input {
+      width: 100%;
+      height: 50px;
+      padding: 0 15px;
+      border: 1px solid #dbe6df;
+      border-radius: 12px;
+      outline: none;
+
+      background: rgba(255, 255, 255, 0.85);
+      color: #172d22;
+      font: inherit;
+      font-size: 14px;
+
+      transition:
+        border-color 0.2s ease,
+        box-shadow 0.2s ease;
+
+      &::placeholder {
+        color: #a1ada5;
+      }
+
+      &:focus {
+        border-color: var(--login-green);
+        box-shadow: 0 0 0 4px rgba(8, 127, 91, 0.1);
+      }
+
+      &:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+    }
+  }
+
+  &__password {
+    position: relative;
+
+    input {
+      padding-right: 75px;
+    }
+
+    button {
+      position: absolute;
+      top: 50%;
+      right: 12px;
+      transform: translateY(-50%);
+
+      padding: 6px;
+      border: 0;
+      background: transparent;
+      color: var(--login-green);
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+  }
+
+  &__error {
+    margin-bottom: 18px;
+    padding: 12px 14px;
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    background: #fff1f2;
+    color: #b42318;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  &__submit {
+    width: 100%;
+    height: 52px;
+    border: 0;
+    border-radius: 13px;
+    background: var(--login-green);
+    color: #fff;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+
+    transition:
+      background 0.2s ease,
+      transform 0.2s ease;
+
+    &:hover:not(:disabled) {
+      background: var(--login-green-dark);
+      transform: translateY(-1px);
+    }
+
+    &:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+  }
+
+  &__footer {
+    margin: 30px 0 0;
+    text-align: center;
+    color: #94a39a;
+    font-size: 12px;
+  }
+
+  @media (max-width: 480px) {
+    &__card {
+      padding: 34px 24px;
+      border-radius: 22px;
+    }
+
+    &__heading {
+      margin: 34px 0 28px;
+    }
+  }
+}
