@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Search,
@@ -19,37 +19,50 @@ import {
 
 import "./Leads.scss";
 
-const STORAGE_KEY = "webro-management-leads-v1";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
 const STATUS_OPTIONS = [
   "New",
   "Contacted",
   "Interested",
-  "Proposal Sent",
-  "Negotiation",
-  "Won",
+  "Follow Up",
+  "Qualified",
+  "Converted",
   "Lost",
 ];
 
-const PRIORITY_OPTIONS = ["Low", "Medium", "High"];
+const PRIORITY_OPTIONS = ["Low", "Medium", "High", "Urgent"];
 
 const SOURCE_OPTIONS = [
   "Website",
-  "Google Maps",
+  "Google",
   "Instagram",
   "Facebook",
   "LinkedIn",
+  "WhatsApp",
   "Referral",
   "Cold Calling",
   "Other",
 ];
 
+const SERVICE_OPTIONS = [
+  "Website Development",
+  "E-commerce Development",
+  "Web Application",
+  "SEO",
+  "Website Maintenance",
+  "Branding",
+  "Other",
+];
+
 const EMPTY_FORM = {
   name: "",
-  business: "",
+  company: "",
   phone: "",
   email: "",
-  service: "",
+  service: "Website Development",
   source: "Website",
   status: "New",
   priority: "Medium",
@@ -57,6 +70,12 @@ const EMPTY_FORM = {
   estimatedValue: "",
   nextFollowUp: "",
   notes: "",
+  lostReason: "",
+};
+
+const getId = (value) => {
+  if (typeof value === "string") return value;
+  return value?._id || value?.id || "";
 };
 
 const currency = (value) =>
@@ -64,57 +83,155 @@ const currency = (value) =>
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 0,
-  }).format(value);
+  }).format(Number(value) || 0);
+
+const dateKey = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toISOString().slice(0, 10);
+};
 
 const formatDate = (value) => {
-  if (!value) return "Not scheduled";
+  const key = dateKey(value);
+  if (!key) return "Not scheduled";
 
-  const date = new Date(`${value}T00:00:00`);
-
-  return Number.isNaN(date.getTime())
-    ? "Invalid date"
-    : new Intl.DateTimeFormat("en-IN", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }).format(date);
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${key}T00:00:00.000Z`));
 };
 
-const readLeads = () => {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return [];
+const normalizeLead = (lead) => ({
+  ...lead,
+  id: getId(lead),
+  company: lead.company || "",
+  assignedTo: getId(lead.assignedTo),
+  assignedName:
+    typeof lead.assignedTo === "object"
+      ? lead.assignedTo?.name || ""
+      : "",
+  nextFollowUp: dateKey(lead.nextFollowUp),
+  estimatedValue: Number(lead.estimatedValue) || 0,
+});
 
-    const parsed = JSON.parse(saved);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+  });
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    const message =
+      result?.message ||
+      `API request failed with status ${response.status}`;
+
+    throw new Error(message);
   }
-};
 
-function LeadModal({ lead, onClose, onSave }) {
-  const [form, setForm] = useState(
+  return result;
+}
+
+async function mutate(path, method, payload) {
+  const csrfResponse = await apiRequest("/auth/csrf");
+
+  if (!csrfResponse.csrfToken) {
+    throw new Error("CSRF token unavailable. Please log in again.");
+  }
+
+  return apiRequest(path, {
+    method,
+    headers: {
+      "X-CSRF-Token": csrfResponse.csrfToken,
+    },
+    ...(payload !== undefined
+      ? { body: JSON.stringify(payload) }
+      : {}),
+  });
+}
+
+async function loadAllLeads(signal) {
+  const leads = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const result = await apiRequest(
+      `/leads?page=${page}&limit=100`,
+      { signal }
+    );
+
+    leads.push(...(result.leads || []));
+    totalPages = result.pagination?.totalPages || 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return leads.map(normalizeLead);
+}
+
+async function loadAssignableUsers() {
+  const users = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const result = await apiRequest(
+      `/users?page=${page}&limit=100`
+    );
+
+    users.push(...(result.users || []));
+    totalPages = result.pagination?.totalPages || 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return users.filter((user) => user.isActive);
+}
+
+function LeadModal({
+  lead,
+  users,
+  canAssign,
+  onClose,
+  onSave,
+}) {
+  const [form, setForm] = useState(() =>
     lead
       ? {
           ...EMPTY_FORM,
           ...lead,
-          estimatedValue: String(lead.estimatedValue ?? ""),
+          estimatedValue: String(lead.estimatedValue ?? 0),
         }
-      : EMPTY_FORM
+      : { ...EMPTY_FORM }
   );
 
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") onClose();
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape" && !saving) {
+        onClose();
+      }
     };
 
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", handleKeyDown);
 
-    return () =>
-      document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose, saving]);
 
   const update = (event) => {
     const { name, value } = event.target;
@@ -122,20 +239,25 @@ function LeadModal({ lead, onClose, onSave }) {
     setForm((previous) => ({
       ...previous,
       [name]: value,
+      ...(name === "status" && value !== "Lost"
+        ? { lostReason: "" }
+        : {}),
     }));
 
     setError("");
   };
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
+    if (saving) return;
 
     const name = form.name.trim();
     const phone = form.phone.trim();
-    const email = form.email.trim();
+    const email = form.email.trim().toLowerCase();
+    const estimatedValue = Number(form.estimatedValue || 0);
 
-    if (!name) {
-      setError("Lead name is required.");
+    if (name.length < 2) {
+      setError("Lead name must contain at least 2 characters.");
       return;
     }
 
@@ -144,46 +266,61 @@ function LeadModal({ lead, onClose, onSave }) {
       return;
     }
 
-    if (
-      email &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-    ) {
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       setError("Enter a valid email address.");
       return;
     }
 
-    const amount =
-      form.estimatedValue === ""
-        ? 0
-        : Number(form.estimatedValue);
-
     if (
-      !Number.isFinite(amount) ||
-      amount < 0 ||
-      amount > 1000000000
+      !Number.isFinite(estimatedValue) ||
+      estimatedValue < 0 ||
+      estimatedValue > 999999999999
     ) {
-      setError("Enter a valid estimated project value.");
+      setError("Enter a valid estimated value.");
       return;
     }
 
-    onSave({
-      ...form,
+    if (form.status === "Converted") {
+      setError("Lead conversion requires the conversion workflow.");
+      return;
+    }
+
+    const payload = {
       name,
-      business: form.business.trim(),
+      company: form.company.trim(),
       phone,
       email,
-      service: form.service.trim(),
-      assignedTo: form.assignedTo.trim(),
+      service: form.service,
+      source: form.source,
+      status: form.status,
+      priority: form.priority,
+      estimatedValue,
+      nextFollowUp: form.nextFollowUp || null,
       notes: form.notes.trim(),
-      estimatedValue: amount,
-    });
+      lostReason:
+        form.status === "Lost" ? form.lostReason.trim() : "",
+    };
+
+    if (canAssign) {
+      payload.assignedTo = form.assignedTo || null;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+      await onSave(payload);
+    } catch (err) {
+      setError(err.message || "Unable to save lead.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div
       className="leads__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (event.target === event.currentTarget && !saving) {
           onClose();
         }
       }}
@@ -206,6 +343,7 @@ function LeadModal({ lead, onClose, onSave }) {
             type="button"
             className="leads__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close form"
           >
             <X size={19} />
@@ -229,11 +367,11 @@ function LeadModal({ lead, onClose, onSave }) {
             <label>
               Business Name
               <input
-                name="business"
-                value={form.business}
+                name="company"
+                value={form.company}
                 onChange={update}
                 placeholder="Company or business"
-                maxLength={120}
+                maxLength={150}
               />
             </label>
 
@@ -242,7 +380,6 @@ function LeadModal({ lead, onClose, onSave }) {
               <input
                 name="phone"
                 type="tel"
-                inputMode="numeric"
                 value={form.phone}
                 onChange={update}
                 placeholder="9876543210"
@@ -264,14 +401,19 @@ function LeadModal({ lead, onClose, onSave }) {
             </label>
 
             <label>
-              Required Service
-              <input
+              Required Service <span>*</span>
+              <select
                 name="service"
                 value={form.service}
                 onChange={update}
-                placeholder="Website Development"
-                maxLength={120}
-              />
+                required
+              >
+                {SERVICE_OPTIONS.map((service) => (
+                  <option key={service} value={service}>
+                    {service}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label>
@@ -282,7 +424,9 @@ function LeadModal({ lead, onClose, onSave }) {
                 onChange={update}
               >
                 {SOURCE_OPTIONS.map((source) => (
-                  <option key={source}>{source}</option>
+                  <option key={source} value={source}>
+                    {source}
+                  </option>
                 ))}
               </select>
             </label>
@@ -294,8 +438,12 @@ function LeadModal({ lead, onClose, onSave }) {
                 value={form.status}
                 onChange={update}
               >
-                {STATUS_OPTIONS.map((status) => (
-                  <option key={status}>{status}</option>
+                {STATUS_OPTIONS.filter(
+                  (status) => status !== "Converted"
+                ).map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
                 ))}
               </select>
             </label>
@@ -308,21 +456,40 @@ function LeadModal({ lead, onClose, onSave }) {
                 onChange={update}
               >
                 {PRIORITY_OPTIONS.map((priority) => (
-                  <option key={priority}>{priority}</option>
+                  <option key={priority} value={priority}>
+                    {priority}
+                  </option>
                 ))}
               </select>
             </label>
 
-            <label>
-              Assigned Employee
-              <input
-                name="assignedTo"
-                value={form.assignedTo}
-                onChange={update}
-                placeholder="Employee name"
-                maxLength={100}
-              />
-            </label>
+            {canAssign && (
+              <label>
+                Assigned Employee
+                <select
+                  name="assignedTo"
+                  value={form.assignedTo}
+                  onChange={update}
+                >
+                  <option value="">Unassigned</option>
+
+                  {form.assignedTo &&
+                    !users.some(
+                      (user) => getId(user) === form.assignedTo
+                    ) && (
+                      <option value={form.assignedTo}>
+                        {form.assignedName || "Current assignment"}
+                      </option>
+                    )}
+
+                  {users.map((user) => (
+                    <option key={getId(user)} value={getId(user)}>
+                      {user.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
 
             <label>
               Estimated Value (₹)
@@ -330,7 +497,7 @@ function LeadModal({ lead, onClose, onSave }) {
                 name="estimatedValue"
                 type="number"
                 min="0"
-                max="1000000000"
+                max="999999999999"
                 step="1"
                 value={form.estimatedValue}
                 onChange={update}
@@ -348,6 +515,19 @@ function LeadModal({ lead, onClose, onSave }) {
               />
             </label>
 
+            {form.status === "Lost" && (
+              <label className="leads__form-full">
+                Lost Reason
+                <textarea
+                  name="lostReason"
+                  value={form.lostReason}
+                  onChange={update}
+                  rows={2}
+                  maxLength={1000}
+                />
+              </label>
+            )}
+
             <label className="leads__form-full">
               Notes
               <textarea
@@ -356,7 +536,7 @@ function LeadModal({ lead, onClose, onSave }) {
                 onChange={update}
                 placeholder="Discussion details, requirements..."
                 rows={4}
-                maxLength={2000}
+                maxLength={5000}
               />
             </label>
           </div>
@@ -372,6 +552,7 @@ function LeadModal({ lead, onClose, onSave }) {
               type="button"
               className="leads__button leads__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -379,8 +560,13 @@ function LeadModal({ lead, onClose, onSave }) {
             <button
               type="submit"
               className="leads__button leads__button--primary"
+              disabled={saving}
             >
-              {lead ? "Save Changes" : "Create Lead"}
+              {saving
+                ? "Saving..."
+                : lead
+                  ? "Save Changes"
+                  : "Create Lead"}
             </button>
           </div>
         </form>
@@ -390,24 +576,67 @@ function LeadModal({ lead, onClose, onSave }) {
 }
 
 export default function Leads() {
-  const [leads, setLeads] = useState(readLeads);
+  const [leads, setLeads] = useState([]);
+  const [users, setUsers] = useState([]);
+
+  const [canAssign, setCanAssign] = useState(false);
+  const [canDelete, setCanDelete] = useState(false);
+
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [priorityFilter, setPriorityFilter] = useState("All");
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingLead, setEditingLead] = useState(null);
-  const [storageError, setStorageError] = useState("");
+
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const refreshLeads = useCallback(() => {
+    setRefreshKey((previous) => previous + 1);
+  }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(leads));
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save changes in browser storage."
-      );
-    }
-  }, [leads]);
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const [leadData, session] = await Promise.all([
+          loadAllLeads(controller.signal),
+          apiRequest("/auth/me", {
+            signal: controller.signal,
+          }),
+        ]);
+
+        if (controller.signal.aborted) return;
+
+        const isManager = ["admin", "manager"].includes(
+          session.user?.role
+        );
+
+        setLeads(leadData);
+        setCanAssign(isManager);
+        setCanDelete(isManager);
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(err.message || "Unable to load leads.");
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => controller.abort();
+  }, [refreshKey]);
 
   const filteredLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -415,99 +644,107 @@ export default function Leads() {
     return leads.filter((lead) => {
       const matchesSearch = [
         lead.name,
-        lead.business,
+        lead.company,
         lead.phone,
         lead.email,
         lead.service,
-        lead.assignedTo,
-      ].some((field) =>
-        String(field ?? "").toLowerCase().includes(query)
+        lead.assignedName,
+      ].some((value) =>
+        String(value ?? "").toLowerCase().includes(query)
       );
 
       return (
         matchesSearch &&
-        (statusFilter === "All" ||
-          lead.status === statusFilter) &&
-        (priorityFilter === "All" ||
-          lead.priority === priorityFilter)
+        (statusFilter === "All" || lead.status === statusFilter) &&
+        (priorityFilter === "All" || lead.priority === priorityFilter)
       );
     });
   }, [leads, search, statusFilter, priorityFilter]);
 
-  const stats = useMemo(
-    () => ({
-      total: leads.length,
-      new: leads.filter((lead) => lead.status === "New").length,
-      interested: leads.filter((lead) =>
-        ["Interested", "Proposal Sent", "Negotiation"].includes(
-          lead.status
-        )
-      ).length,
-      won: leads.filter((lead) => lead.status === "Won").length,
-      pipeline: leads
-        .filter((lead) => !["Won", "Lost"].includes(lead.status))
-        .reduce(
-          (sum, lead) =>
-            sum + (Number(lead.estimatedValue) || 0),
-          0
-        ),
-    }),
-    [leads]
-  );
+  const stats = useMemo(() => ({
+    total: leads.length,
+    new: leads.filter((lead) => lead.status === "New").length,
+    active: leads.filter((lead) =>
+      ["Interested", "Follow Up", "Qualified"].includes(lead.status)
+    ).length,
+    converted: leads.filter(
+      (lead) => lead.status === "Converted"
+    ).length,
+    pipeline: leads
+      .filter(
+        (lead) => !["Converted", "Lost"].includes(lead.status)
+      )
+      .reduce(
+        (total, lead) => total + lead.estimatedValue,
+        0
+      ),
+  }), [leads]);
 
-  const openAdd = () => {
-    setEditingLead(null);
-    setModalOpen(true);
+  const openModal = async (lead = null) => {
+    if (busy) return;
+
+    try {
+      setBusy(true);
+      setError("");
+
+      if (canAssign) {
+        const result = await loadAssignableUsers();
+        setUsers(result);
+      }
+
+      setEditingLead(lead);
+      setModalOpen(true);
+    } catch (err) {
+      setError(err.message || "Unable to open lead form.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const openEdit = (lead) => {
-    setEditingLead(lead);
-    setModalOpen(true);
-  };
-
-  const closeModal = () => {
+  const closeModal = useCallback(() => {
     setModalOpen(false);
     setEditingLead(null);
-  };
+  }, []);
 
-  const saveLead = (form) => {
-    const timestamp = new Date().toISOString();
-
+  const saveLead = async (payload) => {
     if (editingLead) {
-      setLeads((previous) =>
-        previous.map((lead) =>
-          lead.id === editingLead.id
-            ? { ...lead, ...form, updatedAt: timestamp }
-            : lead
-        )
+      await mutate(
+        `/leads/${encodeURIComponent(editingLead.id)}`,
+        "PATCH",
+        payload
       );
     } else {
-      setLeads((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+      await mutate("/leads", "POST", payload);
     }
 
     closeModal();
+    refreshLeads();
   };
 
-  const deleteLead = (lead) => {
+  const deleteLead = async (lead) => {
     if (
-      !window.confirm(
-        `Delete lead "${lead.name}"? This cannot be undone.`
-      )
+      !canDelete ||
+      lead.status === "Converted" ||
+      !window.confirm(`Delete lead "${lead.name}"?`)
     ) {
       return;
     }
 
-    setLeads((previous) =>
-      previous.filter((item) => item.id !== lead.id)
-    );
+    try {
+      setBusy(true);
+      setError("");
+
+      await mutate(
+        `/leads/${encodeURIComponent(lead.id)}`,
+        "DELETE"
+      );
+
+      refreshLeads();
+    } catch (err) {
+      setError(err.message || "Unable to delete lead.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -517,71 +754,56 @@ export default function Leads() {
           <span className="leads__eyebrow">
             SALES MANAGEMENT
           </span>
+
           <h1>Leads Management</h1>
+
           <p>
-            Track enquiries, assign follow-ups, and convert
-            prospects into clients.
+            Track enquiries, assign follow-ups and manage prospects.
           </p>
         </div>
 
         <button
           type="button"
           className="leads__button leads__button--primary"
-          onClick={openAdd}
+          onClick={() => void openModal()}
+          disabled={busy}
         >
           <Plus size={18} />
           Add New Lead
         </button>
       </div>
 
-      {storageError && (
+      {error && (
         <div className="leads__error" role="alert">
-          {storageError}
+          {error}
         </div>
       )}
 
       <div className="leads__stats">
-        <div className="leads__stat">
-          <UsersRound size={21} />
-          <span>Total Leads</span>
-          <strong>{stats.total}</strong>
-        </div>
-
-        <div className="leads__stat">
-          <Clock3 size={21} />
-          <span>New Leads</span>
-          <strong>{stats.new}</strong>
-        </div>
-
-        <div className="leads__stat">
-          <TrendingUp size={21} />
-          <span>Active Opportunities</span>
-          <strong>{stats.interested}</strong>
-        </div>
-
-        <div className="leads__stat">
-          <UserCheck size={21} />
-          <span>Won Leads</span>
-          <strong>{stats.won}</strong>
-        </div>
-
-        <div className="leads__stat">
-          <TrendingUp size={21} />
-          <span>Open Pipeline Value</span>
-          <strong>{currency(stats.pipeline)}</strong>
-        </div>
+        {[
+          { label: "Total Leads", value: stats.total, Icon: UsersRound },
+          { label: "New Leads", value: stats.new, Icon: Clock3 },
+          { label: "Active Opportunities", value: stats.active, Icon: TrendingUp },
+          { label: "Converted Leads", value: stats.converted, Icon: UserCheck },
+          { label: "Open Pipeline Value", value: currency(stats.pipeline), Icon: TrendingUp },
+        ].map(({ label, value, Icon }) => (
+          <div className="leads__stat" key={label}>
+            <Icon size={21} />
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
       </div>
 
       <section className="leads__panel">
         <div className="leads__toolbar">
           <div className="leads__search">
             <Search size={18} />
+
             <input
               type="search"
               value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
+              onChange={(event) => setSearch(event.target.value)}
               placeholder="Search name, business, phone..."
               aria-label="Search leads"
             />
@@ -592,27 +814,27 @@ export default function Leads() {
 
             <select
               value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value)
-              }
+              onChange={(event) => setStatusFilter(event.target.value)}
               aria-label="Filter by status"
             >
               <option value="All">All Statuses</option>
               {STATUS_OPTIONS.map((status) => (
-                <option key={status}>{status}</option>
+                <option key={status} value={status}>
+                  {status}
+                </option>
               ))}
             </select>
 
             <select
               value={priorityFilter}
-              onChange={(event) =>
-                setPriorityFilter(event.target.value)
-              }
+              onChange={(event) => setPriorityFilter(event.target.value)}
               aria-label="Filter by priority"
             >
               <option value="All">All Priorities</option>
               {PRIORITY_OPTIONS.map((priority) => (
-                <option key={priority}>{priority}</option>
+                <option key={priority} value={priority}>
+                  {priority}
+                </option>
               ))}
             </select>
           </div>
@@ -640,15 +862,12 @@ export default function Leads() {
                   <td>
                     <div className="leads__identity">
                       <span className="leads__avatar">
-                        {lead.name?.charAt(0)?.toUpperCase() ||
-                          "L"}
+                        {lead.name?.charAt(0)?.toUpperCase() || "L"}
                       </span>
 
                       <div>
                         <strong>{lead.name}</strong>
-                        <small>
-                          {lead.business || "Individual"}
-                        </small>
+                        <small>{lead.company || "Individual"}</small>
                       </div>
                     </div>
                   </td>
@@ -689,12 +908,10 @@ export default function Leads() {
                     </span>
                   </td>
 
-                  <td>{lead.assignedTo || "Unassigned"}</td>
+                  <td>{lead.assignedName || "Unassigned"}</td>
 
                   <td className="leads__amount">
-                    {currency(
-                      Number(lead.estimatedValue) || 0
-                    )}
+                    {currency(lead.estimatedValue)}
                   </td>
 
                   <td>
@@ -706,29 +923,35 @@ export default function Leads() {
 
                   <td>
                     <div className="leads__actions">
-                      <button
-                        type="button"
-                        onClick={() => openEdit(lead)}
-                        aria-label={`Edit ${lead.name}`}
-                        title="Edit lead"
-                      >
-                        <Pencil size={16} />
-                      </button>
+                      {lead.status !== "Converted" && (
+                        <button
+                          type="button"
+                          onClick={() => void openModal(lead)}
+                          disabled={busy}
+                          title="Edit lead"
+                          aria-label={`Edit ${lead.name}`}
+                        >
+                          <Pencil size={16} />
+                        </button>
+                      )}
 
-                      <button
-                        type="button"
-                        className="leads__delete"
-                        onClick={() => deleteLead(lead)}
-                        aria-label={`Delete ${lead.name}`}
-                        title="Delete lead"
-                      >
-                        <Trash2 size={16} />
-                      </button>
+                      {canDelete && lead.status !== "Converted" && (
+                        <button
+                          type="button"
+                          className="leads__delete"
+                          onClick={() => void deleteLead(lead)}
+                          disabled={busy}
+                          title="Delete lead"
+                          aria-label={`Delete ${lead.name}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
 
                       <a
                         href={`tel:${lead.phone}`}
-                        aria-label={`Call ${lead.name}`}
                         title="Call lead"
+                        aria-label={`Call ${lead.name}`}
                       >
                         <ExternalLink size={16} />
                       </a>
@@ -742,18 +965,25 @@ export default function Leads() {
                   <td colSpan={9}>
                     <div className="leads__empty">
                       <UsersRound size={35} />
-                      <h3>No leads found</h3>
+
+                      <h3>
+                        {loading ? "Loading leads..." : "No leads found"}
+                      </h3>
+
                       <p>
-                        {leads.length === 0
-                          ? "Add your first lead to get started."
-                          : "Try changing your search or filters."}
+                        {loading
+                          ? "Fetching leads from the backend."
+                          : leads.length === 0
+                            ? "Add your first lead to get started."
+                            : "Try changing your search or filters."}
                       </p>
 
-                      {leads.length === 0 && (
+                      {!loading && leads.length === 0 && (
                         <button
                           type="button"
                           className="leads__button leads__button--primary"
-                          onClick={openAdd}
+                          onClick={() => void openModal()}
+                          disabled={busy}
                         >
                           <Plus size={16} />
                           Add Lead
@@ -775,6 +1005,8 @@ export default function Leads() {
       {modalOpen && (
         <LeadModal
           lead={editingLead}
+          users={users}
+          canAssign={canAssign}
           onClose={closeModal}
           onSave={saveLead}
         />

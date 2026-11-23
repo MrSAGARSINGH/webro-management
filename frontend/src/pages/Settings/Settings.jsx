@@ -307,6 +307,9 @@ export default function Settings() {
       const backup = {
         application: "WEBRO Management",
         version: 1,
+        backupScope: "browser-local-only",
+        warning:
+          "Browser localStorage only; MongoDB records are not included.",
         exportedAt: new Date().toISOString(),
         settings,
         records,
@@ -318,12 +321,12 @@ export default function Settings() {
 
       downloadJson(
         backup,
-        `webro-management-backup-${date}.json`
+        `webro-browser-local-backup-${date}.json`
       );
 
       showMessage(
         "success",
-        "Backup file generated successfully."
+        "Browser-only backup exported. MongoDB records are NOT included."
       );
     } catch {
       showMessage(
@@ -360,6 +363,13 @@ export default function Settings() {
         );
       }
 
+      if (
+        backup.backupScope &&
+        backup.backupScope !== "browser-local-only"
+      ) {
+        throw new Error("Unsupported backup scope.");
+      }
+
       for (const [name, records] of Object.entries(
         backup.records
       )) {
@@ -375,7 +385,7 @@ export default function Settings() {
 
       if (
         !window.confirm(
-          "Restore backup? Existing local records in the included modules will be replaced."
+          "Restore browser-local data only? This will NOT restore MongoDB records. Existing local records in the included modules will be replaced."
         )
       ) {
         return;
@@ -978,8 +988,7 @@ export default function Settings() {
                   <div>
                     <h2>Data Backup & Restore</h2>
                     <p>
-                      Export or restore local workspace
-                      records.
+                      Export or restore browser-only records. MongoDB data is not included.
                     </p>
                   </div>
                 </div>
@@ -992,8 +1001,7 @@ export default function Settings() {
                         Export Workspace Backup
                       </h3>
                       <p>
-                        Download settings and module
-                        records as a JSON file.
+                        Download local settings and browser records only. This is not a MongoDB backup.
                       </p>
                     </div>
 
@@ -1014,8 +1022,7 @@ export default function Settings() {
                         Restore Workspace Backup
                       </h3>
                       <p>
-                        Restore data from a compatible
-                        WEBRO Management backup file.
+                        Restore browser-local data from a compatible WEBRO Management backup file. MongoDB is unaffected.
                       </p>
                     </div>
 

@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
   ChevronLeft,
@@ -18,31 +18,16 @@ import {
   MapPin,
   CalendarClock,
 } from "lucide-react";
-
 import "./Calendar.scss";
 
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
+
 const EVENTS_KEY = "webro-management-calendar-v1";
-const TASKS_KEY = "webro-management-tasks-v1";
-const FOLLOWUPS_KEY = "webro-management-followups-v1";
-const PROJECTS_KEY = "webro-management-projects-v1";
 
-const WEEKDAYS = [
-  "Sun",
-  "Mon",
-  "Tue",
-  "Wed",
-  "Thu",
-  "Fri",
-  "Sat",
-];
-
-const EVENT_TYPES = [
-  "Meeting",
-  "Reminder",
-  "Call",
-  "Deadline",
-  "Other",
-];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const EVENT_TYPES = ["Meeting", "Reminder", "Call", "Deadline", "Other"];
 
 const EMPTY_FORM = {
   title: "",
@@ -53,13 +38,12 @@ const EMPTY_FORM = {
   location: "",
 };
 
-const pad = (value) =>
-  String(value).padStart(2, "0");
+const pad = (value) => String(value).padStart(2, "0");
 
 const toDateKey = (date) =>
-  `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
+  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}`;
 
 const todayKey = () => toDateKey(new Date());
 
@@ -71,41 +55,31 @@ const parseDate = (value) => {
     return null;
   }
 
-  const [year, month, day] = value
-    .split("-")
-    .map(Number);
-
+  const [year, month, day] = value.split("-").map(Number);
   const date = new Date(year, month - 1, day);
 
-  if (
-    date.getFullYear() !== year ||
-    date.getMonth() !== month - 1 ||
-    date.getDate() !== day
-  ) {
-    return null;
-  }
-
-  return date;
+  return date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+    ? date
+    : null;
 };
 
 const normalizeDate = (value) => {
-  if (typeof value !== "string") return "";
-
-  const datePart = value.slice(0, 10);
-
-  return parseDate(datePart) ? datePart : "";
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : toDateKey(date);
 };
 
 const formatDate = (value) => {
   const date = parseDate(value);
-
-  if (!date) return "Invalid date";
-
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(date);
+  return date
+    ? new Intl.DateTimeFormat("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }).format(date)
+    : "Invalid date";
 };
 
 const formatMonth = (date) =>
@@ -117,146 +91,151 @@ const formatMonth = (date) =>
 const formatTime = (time) => {
   if (!time) return "All day";
 
-  const [hour, minute] = time.split(":").map(Number);
-
-  if (
-    !Number.isInteger(hour) ||
-    !Number.isInteger(minute)
-  ) {
-    return "All day";
-  }
-
-  const date = new Date(2026, 0, 1, hour, minute);
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+  if (!match) return "All day";
 
   return new Intl.DateTimeFormat("en-IN", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
-  }).format(date);
+  }).format(new Date(2026, 0, 1, Number(match[1]), Number(match[2])));
 };
 
-function readArray(key) {
+const idOf = (value) =>
+  typeof value === "string" ? value : value?._id || value?.id || "";
+
+function readEvents() {
   try {
-    const raw = localStorage.getItem(key);
-
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (event) =>
+            typeof event?.id === "string" &&
+            typeof event.title === "string" &&
+            Boolean(parseDate(event.date))
+        )
+      : [];
   } catch {
     return [];
   }
 }
 
-function readEvents() {
-  return readArray(EVENTS_KEY).filter(
-    (event) =>
-      event &&
-      typeof event.id === "string" &&
-      typeof event.title === "string" &&
-      Boolean(normalizeDate(event.date))
-  );
+async function api(path, signal) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+    signal,
+  });
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    throw new Error(
+      result?.message || `Unable to fetch calendar data (${response.status})`
+    );
+  }
+
+  return result;
 }
 
-function buildIntegratedEvents() {
-  const tasks = readArray(TASKS_KEY);
-  const followUps = readArray(FOLLOWUPS_KEY);
-  const projects = readArray(PROJECTS_KEY);
+async function fetchAll(path, key, signal) {
+  const records = [];
+  let page = 1;
+  let totalPages = 1;
 
+  do {
+    const separator = path.includes("?") ? "&" : "?";
+    const result = await api(
+      `${path}${separator}page=${page}&limit=100`,
+      signal
+    );
+
+    if (!Array.isArray(result[key])) {
+      throw new Error(`Unexpected ${key} response.`);
+    }
+
+    records.push(...result[key]);
+    totalPages = result.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return records;
+}
+
+function buildIntegratedEvents(tasks, followUps, projects) {
   const taskEvents = tasks
     .filter(
       (task) =>
-        task?.id &&
-        task?.title &&
+        idOf(task) &&
+        task.title &&
         normalizeDate(task.dueDate) &&
-        task.status !== "Completed" &&
-        task.status !== "Cancelled"
+        !["Completed", "Cancelled"].includes(task.status)
     )
     .map((task) => ({
-      id: `task-${task.id}`,
+      id: `task-${idOf(task)}`,
       title: task.title,
       date: normalizeDate(task.dueDate),
       time: "",
       type: "Task",
       source: "task",
       description: task.description || "",
-      subtitle: task.projectName || "",
+      subtitle: task.project?.name || "",
       status: task.status,
     }));
 
   const followUpEvents = followUps
     .filter(
       (item) =>
-        item?.id &&
-        normalizeDate(item.dueAt) &&
-        item.status !== "Completed" &&
-        item.status !== "completed"
+        idOf(item) &&
+        item.scheduledAt &&
+        !["Completed", "Cancelled"].includes(item.status)
     )
-    .map((item) => ({
-      id: `followup-${item.id}`,
-      title:
-        item.title ||
-        `Follow-up: ${item.contactName || "Contact"}`,
-      date: normalizeDate(item.dueAt),
-      time: /^\d{2}:\d{2}/.test(
-        item.dueAt?.slice(11) || ""
-      )
-        ? item.dueAt.slice(11, 16)
-        : "",
-      type: "Follow-up",
-      source: "followup",
-      description: item.notes || "",
-      subtitle: item.contactName || "",
-    }));
+    .map((item) => {
+      const scheduled = new Date(item.scheduledAt);
+      const localTime = `${pad(scheduled.getHours())}:${pad(
+        scheduled.getMinutes()
+      )}`;
+
+      return {
+        id: `followup-${idOf(item)}`,
+        title: item.title || "Follow-up",
+        date: toDateKey(scheduled),
+        time: localTime,
+        type: "Follow-up",
+        source: "followup",
+        description: item.description || "",
+        subtitle: item.lead?.name || item.client?.name || "",
+        status: item.status,
+      };
+    });
 
   const projectEvents = projects
     .filter(
       (project) =>
-        project?.id &&
-        normalizeDate(
-          project.endDate || project.deadline
-        ) &&
-        !["Completed", "Cancelled"].includes(
-          project.status
-        )
+        idOf(project) &&
+        normalizeDate(project.deadline) &&
+        !["Completed", "Cancelled"].includes(project.status)
     )
     .map((project) => ({
-      id: `project-${project.id}`,
-      title: `${project.name || project.title || "Project"} deadline`,
-      date: normalizeDate(
-        project.endDate || project.deadline
-      ),
+      id: `project-${idOf(project)}`,
+      title: `${project.name || "Project"} deadline`,
+      date: normalizeDate(project.deadline),
       time: "",
       type: "Project",
       source: "project",
       description: "",
-      subtitle: project.clientName || project.client || "",
+      subtitle: project.client?.name || "",
+      status: project.status,
     }));
 
-  return [
-    ...taskEvents,
-    ...followUpEvents,
-    ...projectEvents,
-  ];
+  return [...taskEvents, ...followUpEvents, ...projectEvents];
 }
 
-function EventModal({
-  event,
-  initialDate,
-  onClose,
-  onSave,
-}) {
+function EventModal({ event, initialDate, onClose, onSave }) {
   const [form, setForm] = useState(() =>
     event
-      ? {
-          ...EMPTY_FORM,
-          ...event,
-        }
-      : {
-          ...EMPTY_FORM,
-          date: initialDate || todayKey(),
-        }
+      ? { ...EMPTY_FORM, ...event }
+      : { ...EMPTY_FORM, date: initialDate || todayKey() }
   );
 
   const [error, setError] = useState("");
@@ -266,26 +245,15 @@ function EventModal({
       if (e.key === "Escape") onClose();
     };
 
-    document.addEventListener(
-      "keydown",
-      handleEscape
-    );
-
-    return () =>
-      document.removeEventListener(
-        "keydown",
-        handleEscape
-      );
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
   }, [onClose]);
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
-
     setForm((previous) => ({
       ...previous,
-      [name]: value,
+      [e.target.name]: e.target.value,
     }));
-
     setError("");
   };
 
@@ -324,9 +292,7 @@ function EventModal({
     <div
       className="calendar-page__backdrop"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) {
-          onClose();
-        }
+        if (e.target === e.currentTarget) onClose();
       }}
     >
       <section
@@ -340,9 +306,7 @@ function EventModal({
             <h2 id="calendar-event-title">
               {event ? "Edit Event" : "Create Event"}
             </h2>
-            <p>
-              Schedule meetings, calls and reminders.
-            </p>
+            <p>Schedule meetings, calls and reminders.</p>
           </div>
 
           <button
@@ -355,10 +319,7 @@ function EventModal({
           </button>
         </div>
 
-        <form
-          className="calendar-page__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="calendar-page__form" onSubmit={handleSubmit}>
           <label>
             Event Title *
             <input
@@ -374,15 +335,9 @@ function EventModal({
           <div className="calendar-page__form-grid">
             <label>
               Event Type
-              <select
-                name="type"
-                value={form.type}
-                onChange={handleChange}
-              >
+              <select name="type" value={form.type} onChange={handleChange}>
                 {EVENT_TYPES.map((type) => (
-                  <option key={type}>
-                    {type}
-                  </option>
+                  <option key={type}>{type}</option>
                 ))}
               </select>
             </label>
@@ -433,10 +388,7 @@ function EventModal({
           </label>
 
           {error && (
-            <p
-              className="calendar-page__form-error"
-              role="alert"
-            >
+            <p className="calendar-page__form-error" role="alert">
               {error}
             </p>
           )}
@@ -449,7 +401,6 @@ function EventModal({
             >
               Cancel
             </button>
-
             <button
               type="submit"
               className="calendar-page__button calendar-page__button--primary"
@@ -464,72 +415,98 @@ function EventModal({
 }
 
 export default function Calendar() {
-  const [currentMonth, setCurrentMonth] =
-    useState(() => {
-      const now = new Date();
-      return new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        1
-      );
-    });
+  const [currentMonth, setCurrentMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
 
-  const [selectedDate, setSelectedDate] =
-    useState(todayKey);
-
+  const [selectedDate, setSelectedDate] = useState(todayKey);
   const [today, setToday] = useState(todayKey);
   const [events, setEvents] = useState(readEvents);
-  const [integratedEvents, setIntegratedEvents] =
-    useState(buildIntegratedEvents);
-
+  const [integratedEvents, setIntegratedEvents] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingEvent, setEditingEvent] =
-    useState(null);
-  const [storageError, setStorageError] =
-    useState("");
+  const [editingEvent, setEditingEvent] = useState(null);
+  const [storageError, setStorageError] = useState("");
+  const [apiError, setApiError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [revision, setRevision] = useState(0);
+
+  const refresh = useCallback(() => {
+    setRevision((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     try {
-      localStorage.setItem(
-        EVENTS_KEY,
-        JSON.stringify(events)
-      );
+      localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
       setStorageError("");
     } catch {
-      setStorageError(
-        "Unable to save calendar events."
-      );
+      setStorageError("Unable to save local calendar events.");
     }
   }, [events]);
 
   useEffect(() => {
-    const refresh = () => {
-      setToday(todayKey());
-      setIntegratedEvents(buildIntegratedEvents());
+    const controller = new AbortController();
+
+    async function load() {
+      setLoading(true);
+
+      const results = await Promise.allSettled([
+        fetchAll("/tasks", "tasks", controller.signal),
+        fetchAll("/follow-ups", "followUps", controller.signal),
+        fetchAll("/projects", "projects", controller.signal),
+      ]);
+
+      if (controller.signal.aborted) return;
+
+      const [tasks, followUps, projects] = results.map((result) =>
+        result.status === "fulfilled" ? result.value : []
+      );
+
+      setIntegratedEvents(
+        buildIntegratedEvents(tasks, followUps, projects)
+      );
+
+      const failures = results
+        .map((result, index) =>
+          result.status === "rejected"
+            ? ["Tasks", "Follow-ups", "Projects"][index]
+            : null
+        )
+        .filter(Boolean);
+
+      setApiError(
+        failures.length
+          ? `Unable to load: ${failures.join(", ")}. Other events remain available.`
+          : ""
+      );
+      setLoading(false);
+    }
+
+    void load();
+
+    return () => controller.abort();
+  }, [revision]);
+
+  useEffect(() => {
+    const updateToday = () => setToday(todayKey());
+    const onFocus = () => {
+      updateToday();
+      refresh();
     };
 
-    const interval = window.setInterval(
-      refresh,
-      60_000
-    );
-
-    window.addEventListener("focus", refresh);
-    window.addEventListener("storage", refresh);
+    const timer = window.setInterval(updateToday, 60_000);
+    window.addEventListener("focus", onFocus);
 
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("storage", refresh);
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
     };
-  }, []);
+  }, [refresh]);
 
   const allEvents = useMemo(
     () =>
       [
-        ...events.map((event) => ({
-          ...event,
-          source: "manual",
-        })),
+        ...events.map((event) => ({ ...event, source: "manual" })),
         ...integratedEvents,
       ].sort((a, b) =>
         `${a.date}T${a.time || "00:00"}`.localeCompare(
@@ -543,10 +520,7 @@ export default function Calendar() {
     const map = new Map();
 
     allEvents.forEach((event) => {
-      if (!map.has(event.date)) {
-        map.set(event.date, []);
-      }
-
+      if (!map.has(event.date)) map.set(event.date, []);
       map.get(event.date).push(event);
     });
 
@@ -556,70 +530,41 @@ export default function Calendar() {
   const calendarDays = useMemo(() => {
     const year = currentMonth.getFullYear();
     const month = currentMonth.getMonth();
+    const leading = new Date(year, month, 1).getDay();
+    const last = new Date(year, month + 1, 0).getDate();
+    const cells = Math.ceil((leading + last) / 7) * 7;
 
-    const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
+    return Array.from({ length: cells }, (_, index) => {
+      const date = new Date(year, month, index - leading + 1);
 
-    const leadingDays = firstDay.getDay();
-    const totalCells = Math.ceil(
-      (leadingDays + lastDay.getDate()) / 7
-    ) * 7;
-
-    return Array.from(
-      { length: totalCells },
-      (_, index) => {
-        const date = new Date(
-          year,
-          month,
-          index - leadingDays + 1
-        );
-
-        return {
-          date: toDateKey(date),
-          day: date.getDate(),
-          currentMonth:
-            date.getMonth() === month &&
-            date.getFullYear() === year,
-        };
-      }
-    );
+      return {
+        date: toDateKey(date),
+        day: date.getDate(),
+        currentMonth:
+          date.getMonth() === month && date.getFullYear() === year,
+      };
+    });
   }, [currentMonth]);
 
-  const selectedEvents =
-    eventsByDate.get(selectedDate) || [];
+  const selectedEvents = eventsByDate.get(selectedDate) || [];
 
   const upcomingEvents = useMemo(
-    () =>
-      allEvents
-        .filter((event) => event.date >= today)
-        .slice(0, 8),
+    () => allEvents.filter((event) => event.date >= today).slice(0, 8),
     [allEvents, today]
   );
 
   const stats = useMemo(() => {
-    const currentMonthPrefix = `${currentMonth.getFullYear()}-${pad(
+    const prefix = `${currentMonth.getFullYear()}-${pad(
       currentMonth.getMonth() + 1
     )}`;
 
     return {
-      total: allEvents.filter((event) =>
-        event.date.startsWith(currentMonthPrefix)
-      ).length,
+      total: allEvents.filter((event) => event.date.startsWith(prefix)).length,
       today: (eventsByDate.get(today) || []).length,
-      upcoming: allEvents.filter(
-        (event) => event.date > today
-      ).length,
-      tasks: integratedEvents.filter(
-        (event) => event.source === "task"
-      ).length,
+      upcoming: allEvents.filter((event) => event.date > today).length,
+      tasks: integratedEvents.filter((event) => event.source === "task").length,
     };
-  }, [
-    allEvents,
-    currentMonth,
-    today,
-    eventsByDate,
-    integratedEvents,
-  ]);
+  }, [allEvents, currentMonth, today, eventsByDate, integratedEvents]);
 
   const changeMonth = (offset) => {
     setCurrentMonth(
@@ -634,25 +579,17 @@ export default function Calendar() {
 
   const goToToday = () => {
     const now = new Date();
-
-    setCurrentMonth(
-      new Date(now.getFullYear(), now.getMonth(), 1)
-    );
+    setCurrentMonth(new Date(now.getFullYear(), now.getMonth(), 1));
     setSelectedDate(todayKey());
   };
 
   const selectDay = (date) => {
     setSelectedDate(date);
-
     const parsed = parseDate(date);
 
     if (parsed) {
       setCurrentMonth(
-        new Date(
-          parsed.getFullYear(),
-          parsed.getMonth(),
-          1
-        )
+        new Date(parsed.getFullYear(), parsed.getMonth(), 1)
       );
     }
   };
@@ -664,11 +601,7 @@ export default function Calendar() {
       setEvents((previous) =>
         previous.map((event) =>
           event.id === editingEvent.id
-            ? {
-                ...event,
-                ...form,
-                updatedAt: timestamp,
-              }
+            ? { ...event, ...form, updatedAt: timestamp }
             : event
         )
       );
@@ -690,18 +623,10 @@ export default function Calendar() {
   };
 
   const deleteEvent = (event) => {
-    if (
-      !window.confirm(
-        `Delete event "${event.title}"?`
-      )
-    ) {
-      return;
-    }
+    if (!window.confirm(`Delete event "${event.title}"?`)) return;
 
     setEvents((previous) =>
-      previous.filter(
-        (item) => item.id !== event.id
-      )
+      previous.filter((item) => item.id !== event.id)
     );
   };
 
@@ -727,30 +652,24 @@ export default function Calendar() {
     const Icon = getEventIcon(event.type);
 
     return (
-      <div
-        className="calendar-page__event"
-        key={event.id}
-      >
+      <div className="calendar-page__event" key={event.id}>
         <div
-          className={`calendar-page__event-icon calendar-page__event-icon--${event.type.toLowerCase().replace(/\s+/g, "-")}`}
+          className={`calendar-page__event-icon calendar-page__event-icon--${event.type
+            .toLowerCase()
+            .replace(/\s+/g, "-")}`}
         >
           <Icon size={17} />
         </div>
 
         <div className="calendar-page__event-info">
           <strong>{event.title}</strong>
-
           <span>
             <Clock3 size={12} />
             {formatTime(event.time)}
             {" · "}
             {event.type}
           </span>
-
-          {event.subtitle && (
-            <small>{event.subtitle}</small>
-          )}
-
+          {event.subtitle && <small>{event.subtitle}</small>}
           {event.location && (
             <small>
               <MapPin size={12} />
@@ -794,10 +713,9 @@ export default function Calendar() {
           <span className="calendar-page__eyebrow">
             SCHEDULE MANAGEMENT
           </span>
-          <h1>Calendar & Reminders</h1>
+          <h1>Calendar &amp; Reminders</h1>
           <p>
-            Track meetings, follow-ups, tasks and
-            project deadlines.
+            Track meetings, follow-ups, tasks and project deadlines.
           </p>
         </div>
 
@@ -814,42 +732,20 @@ export default function Calendar() {
         </button>
       </div>
 
-      {storageError && (
-        <div
-          className="calendar-page__error"
-          role="alert"
-        >
-          {storageError}
+      {(storageError || apiError) && (
+        <div className="calendar-page__error" role="alert">
+          {storageError || apiError}
         </div>
       )}
 
       <div className="calendar-page__stats">
         {[
-          {
-            label: "This Month",
-            value: stats.total,
-            icon: CalendarDays,
-          },
-          {
-            label: "Today",
-            value: stats.today,
-            icon: Clock3,
-          },
-          {
-            label: "Upcoming",
-            value: stats.upcoming,
-            icon: CheckCircle2,
-          },
-          {
-            label: "Task Deadlines",
-            value: stats.tasks,
-            icon: ListTodo,
-          },
+          { label: "This Month", value: stats.total, icon: CalendarDays },
+          { label: "Today", value: stats.today, icon: Clock3 },
+          { label: "Upcoming", value: stats.upcoming, icon: CheckCircle2 },
+          { label: "Task Deadlines", value: stats.tasks, icon: ListTodo },
         ].map(({ label, value, icon: Icon }) => (
-          <div
-            className="calendar-page__stat"
-            key={label}
-          >
+          <div className="calendar-page__stat" key={label}>
             <Icon size={20} />
             <span>{label}</span>
             <strong>{value}</strong>
@@ -873,7 +769,6 @@ export default function Calendar() {
               >
                 Today
               </button>
-
               <button
                 type="button"
                 onClick={() => changeMonth(-1)}
@@ -881,7 +776,6 @@ export default function Calendar() {
               >
                 <ChevronLeft size={19} />
               </button>
-
               <button
                 type="button"
                 onClick={() => changeMonth(1)}
@@ -900,31 +794,22 @@ export default function Calendar() {
 
           <div className="calendar-page__grid">
             {calendarDays.map((day) => {
-              const dayEvents =
-                eventsByDate.get(day.date) || [];
-
-              const selected =
-                selectedDate === day.date;
-
+              const dayEvents = eventsByDate.get(day.date) || [];
+              const selected = selectedDate === day.date;
               const isToday = day.date === today;
 
               return (
                 <button
                   type="button"
                   key={day.date}
-                  onClick={() =>
-                    selectDay(day.date)
-                  }
+                  onClick={() => selectDay(day.date)}
                   aria-label={`${formatDate(day.date)}, ${dayEvents.length} events`}
                   aria-pressed={selected}
                   className={[
                     "calendar-page__day",
-                    !day.currentMonth &&
-                      "calendar-page__day--outside",
-                    selected &&
-                      "calendar-page__day--selected",
-                    isToday &&
-                      "calendar-page__day--today",
+                    !day.currentMonth && "calendar-page__day--outside",
+                    selected && "calendar-page__day--selected",
+                    isToday && "calendar-page__day--today",
                   ]
                     .filter(Boolean)
                     .join(" ")}
@@ -934,22 +819,20 @@ export default function Calendar() {
                   </span>
 
                   <div className="calendar-page__day-events">
-                    {dayEvents.slice(0, 2).map(
-                      (event) => (
-                        <span
-                          key={event.id}
-                          className={`calendar-page__day-event calendar-page__day-event--${event.type.toLowerCase().replace(/\s+/g, "-")}`}
-                          title={event.title}
-                        >
-                          {event.title}
-                        </span>
-                      )
-                    )}
+                    {dayEvents.slice(0, 2).map((event) => (
+                      <span
+                        key={event.id}
+                        className={`calendar-page__day-event calendar-page__day-event--${event.type
+                          .toLowerCase()
+                          .replace(/\s+/g, "-")}`}
+                        title={event.title}
+                      >
+                        {event.title}
+                      </span>
+                    ))}
 
                     {dayEvents.length > 2 && (
-                      <small>
-                        +{dayEvents.length - 2} more
-                      </small>
+                      <small>+{dayEvents.length - 2} more</small>
                     )}
                   </div>
 
@@ -970,9 +853,7 @@ export default function Calendar() {
                   <CalendarDays size={18} />
                   {formatDate(selectedDate)}
                 </h3>
-                <p>
-                  {selectedEvents.length} scheduled events
-                </p>
+                <p>{selectedEvents.length} scheduled events</p>
               </div>
 
               <button
@@ -993,10 +874,10 @@ export default function Calendar() {
               ) : (
                 <div className="calendar-page__empty">
                   <CalendarDays size={28} />
-                  <strong>No events scheduled</strong>
-                  <p>
-                    Select another date or add an event.
-                  </p>
+                  <strong>
+                    {loading ? "Loading schedule..." : "No events scheduled"}
+                  </strong>
+                  <p>Select another date or add an event.</p>
                 </div>
               )}
             </div>
@@ -1016,17 +897,13 @@ export default function Calendar() {
             <div className="calendar-page__upcoming">
               {upcomingEvents.length ? (
                 upcomingEvents.map((event) => {
-                  const Icon = getEventIcon(
-                    event.type
-                  );
+                  const Icon = getEventIcon(event.type);
 
                   return (
                     <button
                       type="button"
                       key={event.id}
-                      onClick={() =>
-                        selectDay(event.date)
-                      }
+                      onClick={() => selectDay(event.date)}
                       className="calendar-page__upcoming-item"
                     >
                       <span className="calendar-page__upcoming-icon">
@@ -1034,9 +911,7 @@ export default function Calendar() {
                       </span>
 
                       <span>
-                        <strong>
-                          {event.title}
-                        </strong>
+                        <strong>{event.title}</strong>
                         <small>
                           {formatDate(event.date)}
                           {" · "}

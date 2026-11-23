@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Search,
@@ -8,364 +8,407 @@ import {
   IndianRupee,
   Clock3,
   Pencil,
-  Trash2,
   Printer,
   X,
   Filter,
-  Download,
   Receipt,
-  ArrowRightLeft,
+  Trash2,
 } from "lucide-react";
 import "./Invoices.scss";
 
-const STORAGE_KEY = "webro-management-invoices-v1";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
+
+const STATUSES = [
+  "Draft",
+  "Issued",
+  "Partially Paid",
+  "Paid",
+  "Overdue",
+  "Cancelled",
+];
 
 const COMPANY = {
   name: "WEBRO Studio",
   address: "Jagatpura, Jaipur, Rajasthan, India",
-  email: "",
-  phone: "",
-  gstin: "",
 };
 
-const STATUSES = [
-  "Draft",
-  "Sent",
-  "Partially Paid",
-  "Paid",
-  "Cancelled",
-];
-
-const EMPTY_ITEM = {
+const blankItem = () => ({
   description: "",
   quantity: "1",
   rate: "",
-};
+  unit: "Service",
+  taxRate: "0",
+});
 
-const EMPTY_FORM = {
-  type: "Invoice",
-  clientName: "",
-  business: "",
-  clientEmail: "",
-  clientPhone: "",
-  billingAddress: "",
-  clientGstin: "",
-  projectName: "",
+const blankForm = () => ({
+  client: "",
+  project: "",
   issueDate: "",
   dueDate: "",
-  status: "Draft",
+  items: [blankItem()],
+  discountAmount: "0",
   taxRate: "0",
-  amountPaid: "0",
+  billingDetails: {
+    businessName: "",
+    billingAddress: "",
+    email: "",
+    phone: "",
+    gstin: "",
+  },
   notes: "",
-  items: [{ ...EMPTY_ITEM }],
-};
+  termsAndConditions: "",
+});
 
-const formatMoney = (value) =>
+const idOf = (value) =>
+  typeof value === "string"
+    ? value
+    : value?._id || value?.id || "";
+
+const money = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 2,
-  }).format(value || 0);
+  }).format(Number(value) || 0);
 
-const pad = (value) => String(value).padStart(2, "0");
+const day = (value) => {
+  if (!value) return "";
 
-const todayKey = () => {
-  const date = new Date();
-  return `${date.getFullYear()}-${pad(
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  return `${date.getFullYear()}-${String(
     date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
+  ).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 };
 
-const formatDate = (value) => {
+const dateText = (value) => {
   if (!value) return "—";
 
-  const date = new Date(`${value}T12:00:00`);
+  const date = new Date(value);
 
-  return Number.isNaN(date.getTime())
-    ? "—"
-    : new Intl.DateTimeFormat("en-IN", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }).format(date);
+  if (Number.isNaN(date.getTime())) return "—";
+
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
 };
 
-const toPaise = (value) =>
-  Math.round((Number(value) || 0) * 100);
+const toISO = (value) =>
+  value ? new Date(`${value}T12:00:00`).toISOString() : null;
 
-const calculateTotals = (document) => {
-  const subtotalPaise = document.items.reduce(
-    (sum, item) =>
+const calculate = (items, discount = 0) => {
+  const subtotal = items.reduce((sum, item) => {
+    const amount =
+      (Number(item.quantity) || 0) *
+      (Number(item.rate ?? item.unitPrice) || 0);
+
+    return sum + Math.round(amount * 100) / 100;
+  }, 0);
+
+  const tax = items.reduce((sum, item) => {
+    const amount =
+      (Number(item.quantity) || 0) *
+      (Number(item.rate ?? item.unitPrice) || 0);
+
+    return (
       sum +
-      Math.round(
-        toPaise(item.rate) * Number(item.quantity)
-      ),
-    0
-  );
-
-  const taxPaise = Math.round(
-    (subtotalPaise * Number(document.taxRate || 0)) / 100
-  );
-
-  const totalPaise = subtotalPaise + taxPaise;
-  const paidPaise = toPaise(document.amountPaid);
+      Math.round(amount * (Number(item.taxRate) || 0)) / 100
+    );
+  }, 0);
 
   return {
-    subtotal: subtotalPaise / 100,
-    tax: taxPaise / 100,
-    total: totalPaise / 100,
-    paid: paidPaise / 100,
-    balance: Math.max(0, totalPaise - paidPaise) / 100,
+    subtotal,
+    tax,
+    total: Math.max(
+      0,
+      Math.round(
+        (subtotal + tax - (Number(discount) || 0)) * 100
+      ) / 100
+    ),
   };
 };
 
-const getStatus = (document, today) => {
-  if (
-    document.status === "Draft" ||
-    document.status === "Cancelled"
-  ) {
-    return document.status;
+async function request(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || data?.success !== true) {
+    const errors = Array.isArray(data?.errors)
+      ? data.errors
+          .map((error) => error.message)
+          .filter(Boolean)
+          .join("; ")
+      : "";
+
+    throw new Error(
+      errors ||
+        data?.message ||
+        `Request failed (${response.status})`
+    );
   }
 
-  if (document.type === "Quotation") {
-    return document.status === "Paid"
-      ? "Accepted"
-      : "Sent";
+  return data;
+}
+
+async function mutate(path, method, body) {
+  const csrf = await request("/auth/csrf");
+
+  if (!csrf.csrfToken) {
+    throw new Error("Session expired. Sign in again.");
   }
 
-  const totals = calculateTotals(document);
+  return request(path, {
+    method,
+    headers: {
+      "X-CSRF-Token": csrf.csrfToken,
+    },
+    ...(body !== undefined
+      ? { body: JSON.stringify(body) }
+      : {}),
+  });
+}
 
-  if (totals.balance === 0) return "Paid";
+async function all(path, key) {
+  const rows = [];
+  let page = 1;
+  let pages = 1;
 
-  if (document.dueDate && document.dueDate < today) {
-    return "Overdue";
-  }
+  do {
+    const separator = path.includes("?") ? "&" : "?";
 
-  if (totals.paid > 0) return "Partially Paid";
+    const data = await request(
+      `${path}${separator}page=${page}&limit=100`
+    );
 
-  return "Sent";
-};
+    if (!Array.isArray(data[key])) {
+      throw new Error(`Invalid ${key} API response`);
+    }
 
-const readDocuments = () => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    rows.push(...data[key]);
+    pages = data.pagination?.totalPages ?? 1;
+    page++;
+  } while (page <= pages);
 
-    const parsed = JSON.parse(raw);
+  return rows;
+}
 
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (item) =>
-            item &&
-            typeof item.id === "string" &&
-            Array.isArray(item.items)
-        )
-      : [];
-  } catch {
-    return [];
-  }
-};
-
-const getNextNumber = (documents, type) => {
-  const prefix = type === "Invoice" ? "INV" : "QUO";
-  const year = new Date().getFullYear();
-  const pattern = new RegExp(`^${prefix}-${year}-(\\d+)$`);
-
-  const max = documents.reduce((highest, document) => {
-    const match = String(document.number).match(pattern);
-    return match
-      ? Math.max(highest, Number(match[1]))
-      : highest;
-  }, 0);
-
-  return `${prefix}-${year}-${String(max + 1).padStart(
-    4,
-    "0"
-  )}`;
-};
-
-function DocumentModal({ document, onClose, onSave }) {
+function DocumentModal({
+  invoice,
+  clients,
+  projects,
+  onClose,
+  onSave,
+}) {
   const [form, setForm] = useState(() =>
-    document
+    invoice
       ? {
-          ...EMPTY_FORM,
-          ...document,
-          items: document.items.map((item) => ({
-            ...item,
-            quantity: String(item.quantity),
-            rate: String(item.rate),
-          })),
-          taxRate: String(document.taxRate),
-          amountPaid: String(document.amountPaid),
+          ...blankForm(),
+          client: idOf(invoice.client),
+          project: idOf(invoice.project),
+          issueDate: day(invoice.issueDate),
+          dueDate: day(invoice.dueDate),
+          items: invoice.items?.length
+            ? invoice.items.map((item) => ({
+                description: item.description,
+                quantity: String(item.quantity),
+                rate: String(item.unitPrice),
+                unit: item.unit || "Service",
+                taxRate: String(item.taxRate),
+              }))
+            : [blankItem()],
+          discountAmount: String(
+            invoice.discountAmount || 0
+          ),
+          taxRate: String(
+            invoice.items?.[0]?.taxRate ?? 0
+          ),
+          billingDetails: {
+            ...blankForm().billingDetails,
+            ...invoice.billingDetails,
+          },
+          notes: invoice.notes || "",
+          termsAndConditions:
+            invoice.termsAndConditions || "",
         }
       : {
-          ...EMPTY_FORM,
-          issueDate: todayKey(),
+          ...blankForm(),
+          issueDate: day(new Date()),
         }
   );
 
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    const onEscape = (event) => {
-      if (event.key === "Escape") onClose();
-    };
+  const totals = useMemo(
+    () =>
+      calculate(
+        form.items.map((item) => ({
+          ...item,
+          taxRate: form.taxRate,
+        })),
+        form.discountAmount
+      ),
+    [form.items, form.taxRate, form.discountAmount]
+  );
 
-    document.addEventListener("keydown", onEscape);
-    return () =>
-      document.removeEventListener("keydown", onEscape);
-  }, [onClose]);
-
-  const changeField = (event) => {
-    const { name, value } = event.target;
-
+  const set = (name, value) => {
     setForm((previous) => ({
       ...previous,
       [name]: value,
-      ...(name === "type" && value === "Quotation"
-        ? { amountPaid: "0", status: "Draft" }
-        : {}),
+      ...(name === "client" ? { project: "" } : {}),
     }));
 
     setError("");
   };
 
-  const changeItem = (index, field, value) => {
+  const itemSet = (index, name, value) => {
     setForm((previous) => ({
       ...previous,
-      items: previous.items.map((item, itemIndex) =>
-        itemIndex === index
-          ? { ...item, [field]: value }
+      items: previous.items.map((item, position) =>
+        position === index
+          ? { ...item, [name]: value }
           : item
       ),
     }));
-
-    setError("");
   };
 
-  const addItem = () => {
+  const billingSet = (name, value) => {
     setForm((previous) => ({
       ...previous,
-      items: [...previous.items, { ...EMPTY_ITEM }],
+      billingDetails: {
+        ...previous.billingDetails,
+        [name]: value,
+      },
     }));
   };
 
-  const removeItem = (index) => {
-    setForm((previous) => ({
-      ...previous,
-      items:
-        previous.items.length === 1
-          ? previous.items
-          : previous.items.filter(
-              (_, itemIndex) => itemIndex !== index
-            ),
-    }));
-  };
-
-  const totals = calculateTotals(form);
-
-  const handleSubmit = (event) => {
+  const save = async (event) => {
     event.preventDefault();
 
-    if (!form.clientName.trim()) {
-      setError("Client name is required.");
+    if (saving) return;
+
+    if (!form.client) {
+      setError("Select a client.");
       return;
     }
 
     if (
-      !form.issueDate ||
-      (form.dueDate && form.dueDate < form.issueDate)
+      form.dueDate &&
+      form.issueDate &&
+      form.dueDate < form.issueDate
     ) {
-      setError("Enter valid issue and due dates.");
+      setError("Due date must not be before issue date.");
       return;
     }
 
+    const items = form.items.map((item) => ({
+      description: item.description.trim(),
+      quantity: Number(item.quantity),
+      unit: item.unit,
+      unitPrice: Number(item.rate),
+      taxRate: Number(form.taxRate),
+    }));
+
     if (
-      form.items.some(
+      !items.length ||
+      items.some(
         (item) =>
-          !item.description.trim() ||
-          !Number.isInteger(Number(item.quantity)) ||
-          Number(item.quantity) <= 0 ||
-          item.rate === "" ||
-          !Number.isFinite(Number(item.rate)) ||
-          Number(item.rate) < 0 ||
-          !Number.isInteger(Number(item.rate) * 100)
+          item.description.length < 2 ||
+          !Number.isFinite(item.quantity) ||
+          item.quantity < 0.001 ||
+          item.quantity > 1000000 ||
+          !Number.isFinite(item.unitPrice) ||
+          item.unitPrice < 0 ||
+          Math.abs(
+            Math.round(item.unitPrice * 100) -
+              item.unitPrice * 100
+          ) > 0.000001 ||
+          !Number.isFinite(item.taxRate) ||
+          item.taxRate < 0 ||
+          item.taxRate > 100
       )
     ) {
       setError(
-        "Every item needs a description, positive integer quantity and valid rate."
+        "Check item descriptions, quantities, rates and tax."
       );
       return;
     }
 
-    const taxRate = Number(form.taxRate);
-    const amountPaid = Number(form.amountPaid);
+    const discount = Number(form.discountAmount);
 
     if (
-      !Number.isFinite(taxRate) ||
-      taxRate < 0 ||
-      taxRate > 100
+      !Number.isFinite(discount) ||
+      discount < 0 ||
+      Math.abs(
+        Math.round(discount * 100) - discount * 100
+      ) > 0.000001
     ) {
-      setError("GST rate must be between 0 and 100.");
+      setError("Invalid discount amount.");
       return;
     }
 
-    if (
-      !Number.isFinite(amountPaid) ||
-      amountPaid < 0 ||
-      !Number.isInteger(amountPaid * 100) ||
-      amountPaid > totals.total
-    ) {
-      setError(
-        "Amount paid cannot exceed the invoice total."
-      );
-      return;
-    }
-
-    if (
-      form.type === "Quotation" &&
-      amountPaid !== 0
-    ) {
-      setError("Quotations cannot record payments.");
-      return;
-    }
-
-    if (
-      form.status === "Paid" &&
-      amountPaid !== totals.total &&
-      form.type === "Invoice"
-    ) {
-      setError(
-        "A paid invoice must have its full amount received."
-      );
-      return;
-    }
-
-    onSave({
-      ...form,
-      clientName: form.clientName.trim(),
-      business: form.business.trim(),
-      clientEmail: form.clientEmail.trim(),
-      clientPhone: form.clientPhone.trim(),
-      billingAddress: form.billingAddress.trim(),
-      clientGstin: form.clientGstin.trim().toUpperCase(),
-      projectName: form.projectName.trim(),
+    const payload = {
+      client: form.client,
+      project: form.project || null,
+      issueDate: toISO(form.issueDate),
+      dueDate: toISO(form.dueDate),
+      items,
+      discountAmount: discount,
+      billingDetails: {
+        ...form.billingDetails,
+        gstin: form.billingDetails.gstin
+          .trim()
+          .toUpperCase(),
+      },
       notes: form.notes.trim(),
-      taxRate,
-      amountPaid,
-      items: form.items.map((item) => ({
-        description: item.description.trim(),
-        quantity: Number(item.quantity),
-        rate: Number(item.rate),
-      })),
-    });
+      termsAndConditions:
+        form.termsAndConditions.trim(),
+    };
+
+    if (!invoice) {
+      payload.currency = "INR";
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+      await onSave(payload);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const availableProjects = projects.filter(
+    (project) => idOf(project.client) === form.client
+  );
 
   return (
     <div
       className="invoices__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (
+          event.target === event.currentTarget &&
+          !saving
+        ) {
           onClose();
         }
       }}
@@ -379,7 +422,7 @@ function DocumentModal({ document, onClose, onSave }) {
         <div className="invoices__modal-header">
           <div>
             <h2 id="invoice-modal-title">
-              {document ? "Edit Document" : "New Document"}
+              {invoice ? "Edit Document" : "New Document"}
             </h2>
             <p>Configure billing and line items.</p>
           </div>
@@ -387,6 +430,7 @@ function DocumentModal({ document, onClose, onSave }) {
           <button
             type="button"
             className="invoices__icon-button"
+            disabled={saving}
             onClick={onClose}
             aria-label="Close"
           >
@@ -394,58 +438,84 @@ function DocumentModal({ document, onClose, onSave }) {
           </button>
         </div>
 
-        <form
-          className="invoices__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="invoices__form" onSubmit={save}>
           <div className="invoices__form-grid">
             <label>
               Document Type
-              <select
-                name="type"
-                value={form.type}
-                onChange={changeField}
-                disabled={Boolean(document)}
-              >
+              <select value="Invoice" disabled>
                 <option>Invoice</option>
-                <option>Quotation</option>
               </select>
             </label>
 
             <label>
               Status
               <select
-                name="status"
-                value={form.status}
-                onChange={changeField}
+                value={invoice?.status || "Draft"}
+                disabled
               >
-                {(form.type === "Quotation"
-                  ? ["Draft", "Sent", "Cancelled"]
-                  : STATUSES
-                ).map((status) => (
-                  <option key={status}>{status}</option>
-                ))}
+                <option>
+                  {invoice?.status || "Draft"}
+                </option>
               </select>
             </label>
 
             <label>
               Client Name *
-              <input
-                name="clientName"
-                value={form.clientName}
-                onChange={changeField}
+              <select
+                value={form.client}
+                onChange={(event) =>
+                  set("client", event.target.value)
+                }
                 required
-                maxLength={100}
-              />
+              >
+                <option value="">Select client</option>
+
+                {clients.map((client) => (
+                  <option
+                    key={idOf(client)}
+                    value={idOf(client)}
+                  >
+                    {client.name}
+                    {client.company
+                      ? ` — ${client.company}`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              Project Name
+              <select
+                value={form.project}
+                onChange={(event) =>
+                  set("project", event.target.value)
+                }
+              >
+                <option value="">No project</option>
+
+                {availableProjects.map((project) => (
+                  <option
+                    key={idOf(project)}
+                    value={idOf(project)}
+                  >
+                    {project.name || project.title}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label>
               Business Name
               <input
-                name="business"
-                value={form.business}
-                onChange={changeField}
-                maxLength={120}
+                value={form.billingDetails.businessName}
+                onChange={(event) =>
+                  billingSet(
+                    "businessName",
+                    event.target.value
+                  )
+                }
+                maxLength={200}
               />
             </label>
 
@@ -453,80 +523,91 @@ function DocumentModal({ document, onClose, onSave }) {
               Client Email
               <input
                 type="email"
-                name="clientEmail"
-                value={form.clientEmail}
-                onChange={changeField}
+                value={form.billingDetails.email}
+                onChange={(event) =>
+                  billingSet("email", event.target.value)
+                }
               />
             </label>
 
             <label>
               Client Phone
               <input
-                name="clientPhone"
-                value={form.clientPhone}
-                onChange={changeField}
-                maxLength={20}
-              />
-            </label>
-
-            <label className="invoices__form-full">
-              Billing Address
-              <textarea
-                name="billingAddress"
-                value={form.billingAddress}
-                onChange={changeField}
-                rows={2}
+                value={form.billingDetails.phone}
+                onChange={(event) =>
+                  billingSet("phone", event.target.value)
+                }
+                maxLength={30}
               />
             </label>
 
             <label>
               Client GSTIN
               <input
-                name="clientGstin"
-                value={form.clientGstin}
-                onChange={changeField}
+                value={form.billingDetails.gstin}
+                onChange={(event) =>
+                  billingSet("gstin", event.target.value)
+                }
                 maxLength={15}
-                placeholder="Optional"
+              />
+            </label>
+
+            <label className="invoices__form-full">
+              Billing Address
+              <textarea
+                rows={2}
+                value={
+                  form.billingDetails.billingAddress
+                }
+                onChange={(event) =>
+                  billingSet(
+                    "billingAddress",
+                    event.target.value
+                  )
+                }
+                maxLength={1000}
               />
             </label>
 
             <label>
-              Project Name
-              <input
-                name="projectName"
-                value={form.projectName}
-                onChange={changeField}
-              />
-            </label>
-
-            <label>
-              Issue Date *
+              Issue Date
               <input
                 type="date"
-                name="issueDate"
                 value={form.issueDate}
-                onChange={changeField}
-                required
+                onChange={(event) =>
+                  set("issueDate", event.target.value)
+                }
               />
             </label>
 
             <label>
-              Due / Valid Until
+              Due Date
               <input
                 type="date"
-                name="dueDate"
                 value={form.dueDate}
-                onChange={changeField}
+                onChange={(event) =>
+                  set("dueDate", event.target.value)
+                }
               />
             </label>
           </div>
 
           <div className="invoices__items-header">
             <h3>Line Items</h3>
+
             <button
               type="button"
               className="invoices__button invoices__button--secondary"
-              onClick={addItem}
+              disabled={form.items.length >= 100}
+              onClick={() =>
+                setForm((previous) => ({
+                  ...previous,
+                  items: [
+                    ...previous.items,
+                    blankItem(),
+                  ],
+                }))
+              }
             >
               <Plus size={15} />
               Add Item
@@ -535,20 +616,24 @@ function DocumentModal({ document, onClose, onSave }) {
 
           <div className="invoices__items">
             {form.items.map((item, index) => (
-              <div className="invoices__item" key={index}>
+              <div
+                className="invoices__item"
+                key={index}
+              >
                 <label className="invoices__item-description">
                   Description
                   <input
                     value={item.description}
+                    maxLength={500}
+                    required
                     onChange={(event) =>
-                      changeItem(
+                      itemSet(
                         index,
                         "description",
                         event.target.value
                       )
                     }
                     placeholder="Website development"
-                    required
                   />
                 </label>
 
@@ -556,11 +641,12 @@ function DocumentModal({ document, onClose, onSave }) {
                   Qty
                   <input
                     type="number"
-                    min="1"
-                    step="1"
+                    min="0.001"
+                    max="1000000"
+                    step="any"
                     value={item.quantity}
                     onChange={(event) =>
-                      changeItem(
+                      itemSet(
                         index,
                         "quantity",
                         event.target.value
@@ -578,7 +664,7 @@ function DocumentModal({ document, onClose, onSave }) {
                     step="0.01"
                     value={item.rate}
                     onChange={(event) =>
-                      changeItem(
+                      itemSet(
                         index,
                         "rate",
                         event.target.value
@@ -591,8 +677,16 @@ function DocumentModal({ document, onClose, onSave }) {
                 <button
                   type="button"
                   className="invoices__icon-button invoices__item-delete"
-                  onClick={() => removeItem(index)}
                   disabled={form.items.length === 1}
+                  onClick={() =>
+                    setForm((previous) => ({
+                      ...previous,
+                      items: previous.items.filter(
+                        (_, position) =>
+                          position !== index
+                      ),
+                    }))
+                  }
                   aria-label={`Remove item ${index + 1}`}
                 >
                   <Trash2 size={17} />
@@ -605,38 +699,59 @@ function DocumentModal({ document, onClose, onSave }) {
             <label>
               GST Rate (%)
               <select
-                name="taxRate"
                 value={form.taxRate}
-                onChange={changeField}
+                onChange={(event) =>
+                  set("taxRate", event.target.value)
+                }
               >
-                <option value="0">0%</option>
-                <option value="5">5%</option>
-                <option value="12">12%</option>
-                <option value="18">18%</option>
-                <option value="28">28%</option>
+                {[0, 5, 12, 18, 28].map((rate) => (
+                  <option
+                    key={rate}
+                    value={String(rate)}
+                  >
+                    {rate}%
+                  </option>
+                ))}
               </select>
             </label>
 
-            {form.type === "Invoice" && (
-              <label>
-                Amount Received (₹)
-                <input
-                  type="number"
-                  name="amountPaid"
-                  min="0"
-                  step="0.01"
-                  value={form.amountPaid}
-                  onChange={changeField}
-                />
-              </label>
-            )}
+            <label>
+              Discount (₹)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.discountAmount}
+                onChange={(event) =>
+                  set(
+                    "discountAmount",
+                    event.target.value
+                  )
+                }
+              />
+            </label>
 
             <label className="invoices__form-full">
               Notes / Payment Terms
               <textarea
-                name="notes"
                 value={form.notes}
-                onChange={changeField}
+                onChange={(event) =>
+                  set("notes", event.target.value)
+                }
+                rows={3}
+              />
+            </label>
+
+            <label className="invoices__form-full">
+              Terms & Conditions
+              <textarea
+                value={form.termsAndConditions}
+                onChange={(event) =>
+                  set(
+                    "termsAndConditions",
+                    event.target.value
+                  )
+                }
                 rows={3}
               />
             </label>
@@ -645,26 +760,34 @@ function DocumentModal({ document, onClose, onSave }) {
           <div className="invoices__totals">
             <div>
               <span>Subtotal</span>
-              <strong>{formatMoney(totals.subtotal)}</strong>
+              <strong>
+                {money(totals.subtotal)}
+              </strong>
             </div>
+
             <div>
               <span>GST ({form.taxRate}%)</span>
-              <strong>{formatMoney(totals.tax)}</strong>
+              <strong>{money(totals.tax)}</strong>
             </div>
+
+            <div>
+              <span>Discount</span>
+              <strong>
+                {money(form.discountAmount)}
+              </strong>
+            </div>
+
             <div className="invoices__totals-final">
               <span>Total</span>
-              <strong>{formatMoney(totals.total)}</strong>
+              <strong>{money(totals.total)}</strong>
             </div>
-            {form.type === "Invoice" && (
-              <div>
-                <span>Balance Due</span>
-                <strong>{formatMoney(totals.balance)}</strong>
-              </div>
-            )}
           </div>
 
           {error && (
-            <p className="invoices__form-error" role="alert">
+            <p
+              className="invoices__form-error"
+              role="alert"
+            >
               {error}
             </p>
           )}
@@ -674,14 +797,21 @@ function DocumentModal({ document, onClose, onSave }) {
               type="button"
               className="invoices__button invoices__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
+
             <button
               type="submit"
               className="invoices__button invoices__button--primary"
+              disabled={saving}
             >
-              {document ? "Save Changes" : "Create Document"}
+              {saving
+                ? "Saving..."
+                : invoice
+                  ? "Save Changes"
+                  : "Create Document"}
             </button>
           </div>
         </form>
@@ -690,24 +820,32 @@ function DocumentModal({ document, onClose, onSave }) {
   );
 }
 
-function PrintableDocument({ document, onClose }) {
-  const totals = calculateTotals(document);
+function PrintableDocument({ invoice, onClose }) {
+  const items = invoice.items || [];
 
   useEffect(() => {
-    const onEscape = (event) => {
-      if (event.key === "Escape") onClose();
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
     };
 
-    document.addEventListener("keydown", onEscape);
-    return () =>
-      document.removeEventListener("keydown", onEscape);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener(
+        "keydown",
+        handleEscape
+      );
+    };
   }, [onClose]);
 
   return (
     <div className="invoices__preview-backdrop">
       <div className="invoices__preview-shell">
         <div className="invoices__preview-actions">
-          <strong>{document.number}</strong>
+          <strong>{invoice.invoiceNumber}</strong>
+
           <div>
             <button
               type="button"
@@ -717,6 +855,7 @@ function PrintableDocument({ document, onClose }) {
               <Printer size={16} />
               Print / Save PDF
             </button>
+
             <button
               type="button"
               className="invoices__icon-button"
@@ -733,58 +872,75 @@ function PrintableDocument({ document, onClose }) {
             <div>
               <h1>{COMPANY.name}</h1>
               <p>{COMPANY.address}</p>
-              {COMPANY.email && <p>{COMPANY.email}</p>}
-              {COMPANY.phone && <p>{COMPANY.phone}</p>}
-              {COMPANY.gstin && (
-                <p>GSTIN: {COMPANY.gstin}</p>
-              )}
             </div>
+
             <div className="invoices__paper-title">
-              <h2>{document.type.toUpperCase()}</h2>
-              <strong>{document.number}</strong>
+              <h2>INVOICE</h2>
+              <strong>
+                {invoice.invoiceNumber}
+              </strong>
             </div>
           </header>
 
           <div className="invoices__paper-meta">
             <div>
               <span>BILL TO</span>
+
               <strong>
-                {document.business || document.clientName}
+                {invoice.billingDetails?.businessName ||
+                  invoice.client?.company ||
+                  invoice.client?.name ||
+                  "Client"}
               </strong>
-              {document.business && (
-                <p>{document.clientName}</p>
+
+              {invoice.client?.name && (
+                <p>{invoice.client.name}</p>
               )}
-              {document.billingAddress && (
-                <p>{document.billingAddress}</p>
+
+              {invoice.billingDetails?.billingAddress && (
+                <p>
+                  {
+                    invoice.billingDetails
+                      .billingAddress
+                  }
+                </p>
               )}
-              {document.clientEmail && (
-                <p>{document.clientEmail}</p>
+
+              {invoice.billingDetails?.email && (
+                <p>
+                  {invoice.billingDetails.email}
+                </p>
               )}
-              {document.clientPhone && (
-                <p>{document.clientPhone}</p>
+
+              {invoice.billingDetails?.phone && (
+                <p>
+                  {invoice.billingDetails.phone}
+                </p>
               )}
-              {document.clientGstin && (
-                <p>GSTIN: {document.clientGstin}</p>
+
+              {invoice.billingDetails?.gstin && (
+                <p>
+                  GSTIN:{" "}
+                  {invoice.billingDetails.gstin}
+                </p>
               )}
             </div>
 
             <div>
               <p>
                 <span>Issue Date:</span>{" "}
-                {formatDate(document.issueDate)}
+                {dateText(invoice.issueDate)}
               </p>
+
               <p>
-                <span>
-                  {document.type === "Quotation"
-                    ? "Valid Until:"
-                    : "Due Date:"}
-                </span>{" "}
-                {formatDate(document.dueDate)}
+                <span>Due Date:</span>{" "}
+                {dateText(invoice.dueDate)}
               </p>
-              {document.projectName && (
+
+              {invoice.project?.name && (
                 <p>
                   <span>Project:</span>{" "}
-                  {document.projectName}
+                  {invoice.project.name}
                 </p>
               )}
             </div>
@@ -799,15 +955,21 @@ function PrintableDocument({ document, onClose }) {
                 <th>Amount</th>
               </tr>
             </thead>
+
             <tbody>
-              {document.items.map((item, index) => (
+              {items.map((item, index) => (
                 <tr key={index}>
                   <td>{item.description}</td>
-                  <td>{item.quantity}</td>
-                  <td>{formatMoney(item.rate)}</td>
                   <td>
-                    {formatMoney(
-                      item.quantity * item.rate
+                    {item.quantity} {item.unit}
+                  </td>
+                  <td>
+                    {money(item.unitPrice)}
+                  </td>
+                  <td>
+                    {money(
+                      Number(item.quantity) *
+                        Number(item.unitPrice)
                     )}
                   </td>
                 </tr>
@@ -818,36 +980,67 @@ function PrintableDocument({ document, onClose }) {
           <div className="invoices__paper-totals">
             <div>
               <span>Subtotal</span>
-              <strong>{formatMoney(totals.subtotal)}</strong>
+              <strong>
+                {money(invoice.subtotal)}
+              </strong>
             </div>
+
             <div>
-              <span>GST ({document.taxRate}%)</span>
-              <strong>{formatMoney(totals.tax)}</strong>
+              <span>Tax</span>
+              <strong>
+                {money(invoice.taxAmount)}
+              </strong>
             </div>
+
+            <div>
+              <span>Discount</span>
+              <strong>
+                {money(invoice.discountAmount)}
+              </strong>
+            </div>
+
             <div className="invoices__paper-total">
               <span>Total Amount</span>
-              <strong>{formatMoney(totals.total)}</strong>
+              <strong>
+                {money(invoice.grandTotal)}
+              </strong>
             </div>
-            {document.type === "Invoice" && (
-              <>
-                <div>
-                  <span>Received</span>
-                  <strong>{formatMoney(totals.paid)}</strong>
-                </div>
-                <div>
-                  <span>Balance Due</span>
-                  <strong>
-                    {formatMoney(totals.balance)}
-                  </strong>
-                </div>
-              </>
-            )}
+
+            <div>
+              <span>Received</span>
+              <strong>
+                {money(invoice.paidAmount)}
+              </strong>
+            </div>
+
+            <div>
+              <span>Balance Due</span>
+              <strong>
+                {money(
+                  invoice.balanceDue ??
+                    Math.max(
+                      0,
+                      Number(invoice.grandTotal) -
+                        Number(invoice.paidAmount)
+                    )
+                )}
+              </strong>
+            </div>
           </div>
 
-          {document.notes && (
+          {invoice.notes && (
             <div className="invoices__paper-notes">
               <strong>Notes / Terms</strong>
-              <p>{document.notes}</p>
+              <p>{invoice.notes}</p>
+            </div>
+          )}
+
+          {invoice.termsAndConditions && (
+            <div className="invoices__paper-notes">
+              <strong>Terms & Conditions</strong>
+              <p>
+                {invoice.termsAndConditions}
+              </p>
             </div>
           )}
 
@@ -862,221 +1055,242 @@ function PrintableDocument({ document, onClose }) {
 }
 
 export default function Invoices() {
-  const [documents, setDocuments] =
-    useState(readDocuments);
+  const [documents, setDocuments] = useState([]);
+  const [stats, setStats] = useState({});
+
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("All");
+  const [typeFilter, setTypeFilter] =
+    useState("All");
   const [statusFilter, setStatusFilter] =
     useState("All");
+
   const [editingDocument, setEditingDocument] =
     useState(null);
-  const [modalOpen, setModalOpen] = useState(false);
+  const [modalOpen, setModalOpen] =
+    useState(false);
   const [preview, setPreview] = useState(null);
-  const [storageError, setStorageError] =
-    useState("");
-  const [today, setToday] = useState(todayKey);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(documents)
-      );
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save documents in browser storage."
-      );
-    }
-  }, [documents]);
+  const [clients, setClients] = useState([]);
+  const [projects, setProjects] = useState([]);
 
-  useEffect(() => {
-    const refresh = () => setToday(todayKey());
-    const interval = window.setInterval(refresh, 60_000);
-    window.addEventListener("focus", refresh);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [revision, setRevision] = useState(0);
 
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
+  const refresh = useCallback(() => {
+    setRevision((value) => value + 1);
   }, []);
 
-  const stats = useMemo(() => {
-    const invoices = documents.filter(
-      (document) =>
-        document.type === "Invoice" &&
-        document.status !== "Cancelled"
-    );
+  useEffect(() => {
+    let active = true;
 
-    const quotations = documents.filter(
-      (document) =>
-        document.type === "Quotation" &&
-        document.status !== "Cancelled"
-    );
+    async function load() {
+      setLoading(true);
 
-    return {
-      invoices: invoices.length,
-      quotations: quotations.length,
-      billed: invoices.reduce(
-        (sum, document) =>
-          sum + calculateTotals(document).total,
-        0
-      ),
-      received: invoices.reduce(
-        (sum, document) =>
-          sum + calculateTotals(document).paid,
-        0
-      ),
-      outstanding: invoices.reduce(
-        (sum, document) =>
-          sum + calculateTotals(document).balance,
-        0
-      ),
+      try {
+        const [records, summary] =
+          await Promise.all([
+            all("/invoices", "invoices"),
+            request("/invoices/stats"),
+          ]);
+
+        if (!active) return;
+
+        setDocuments(records);
+        setStats(summary.stats || {});
+        setError("");
+      } catch (err) {
+        if (active) {
+          setError(err.message);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
     };
-  }, [documents]);
+  }, [revision]);
 
-  const filteredDocuments = useMemo(() => {
+  const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return documents
-      .filter((document) => {
-        const matchesSearch = [
-          document.number,
-          document.clientName,
-          document.business,
-          document.projectName,
-        ].some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(query)
-        );
+    return documents.filter((invoice) => {
+      const matchesStatus =
+        statusFilter === "All" ||
+        invoice.status === statusFilter;
 
-        return (
-          matchesSearch &&
-          (typeFilter === "All" ||
-            document.type === typeFilter) &&
-          (statusFilter === "All" ||
-            getStatus(document, today) ===
-              statusFilter)
-        );
-      })
-      .sort((a, b) =>
-        b.createdAt.localeCompare(a.createdAt)
+      const matchesSearch = [
+        invoice.invoiceNumber,
+        invoice.client?.name,
+        invoice.client?.company,
+        invoice.project?.name,
+      ].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(query)
       );
-  }, [documents, search, typeFilter, statusFilter, today]);
 
-  const openCreate = () => {
-    setEditingDocument(null);
-    setModalOpen(true);
-  };
+      return matchesStatus && matchesSearch;
+    });
+  }, [documents, search, statusFilter]);
 
-  const openEdit = (document) => {
-    setEditingDocument(document);
-    setModalOpen(true);
-  };
+  const openForm = async (invoice = null) => {
+    if (busy) return;
 
-  const saveDocument = (form) => {
-    const timestamp = new Date().toISOString();
+    try {
+      setBusy(true);
+      setError("");
 
-    if (editingDocument) {
-      setDocuments((previous) =>
-        previous.map((document) =>
-          document.id === editingDocument.id
-            ? {
-                ...document,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : document
+      const [clientList, projectList] =
+        await Promise.all([
+          all("/clients", "clients"),
+          all("/projects", "projects"),
+        ]);
+
+      if (
+        invoice?.client &&
+        typeof invoice.client === "object" &&
+        !clientList.some(
+          (client) =>
+            idOf(client) === idOf(invoice.client)
         )
-      );
-    } else {
-      setDocuments((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          number: getNextNumber(
-            previous,
-            form.type
-          ),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+      ) {
+        clientList.unshift(invoice.client);
+      }
+
+      setClients(clientList);
+      setProjects(projectList);
+      setEditingDocument(invoice);
+      setModalOpen(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
     }
+  };
+
+  const save = async (payload) => {
+    const path = editingDocument
+      ? `/invoices/${idOf(editingDocument)}`
+      : "/invoices";
+
+    const method = editingDocument
+      ? "PATCH"
+      : "POST";
+
+    await mutate(path, method, payload);
 
     setModalOpen(false);
     setEditingDocument(null);
+    refresh();
   };
 
-  const deleteDocument = (document) => {
+  const issue = async (invoice) => {
+    if (!invoice.issueDate || !invoice.dueDate) {
+      setError(
+        "Edit draft and set issue date and due date before issuing."
+      );
+      return;
+    }
+
     if (
       !window.confirm(
-        `Delete ${document.number}? This cannot be undone.`
+        `Issue invoice ${invoice.invoiceNumber}?`
       )
     ) {
       return;
     }
 
-    setDocuments((previous) =>
-      previous.filter(
-        (item) => item.id !== document.id
-      )
+    try {
+      setBusy(true);
+      setError("");
+
+      await mutate(
+        `/invoices/${idOf(invoice)}/issue`,
+        "PATCH",
+        {
+          issueDate: new Date(
+            invoice.issueDate
+          ).toISOString(),
+          dueDate: new Date(
+            invoice.dueDate
+          ).toISOString(),
+        }
+      );
+
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = async (invoice) => {
+    const reason = window.prompt(
+      `Reason for cancelling ${invoice.invoiceNumber} (minimum 3 characters):`
     );
-  };
 
-  const convertQuotation = (quotation) => {
-    if (
-      !window.confirm(
-        `Convert ${quotation.number} to an invoice?`
-      )
-    ) {
+    if (reason === null) return;
+
+    if (reason.trim().length < 3) {
+      setError(
+        "Cancellation reason must contain at least 3 characters."
+      );
       return;
     }
 
-    const timestamp = new Date().toISOString();
+    try {
+      setBusy(true);
+      setError("");
 
-    setDocuments((previous) => [
-      {
-        ...quotation,
-        id: crypto.randomUUID(),
-        type: "Invoice",
-        number: getNextNumber(previous, "Invoice"),
-        sourceQuotation: quotation.number,
-        status: "Draft",
-        amountPaid: 0,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      },
-      ...previous,
-    ]);
+      await mutate(
+        `/invoices/${idOf(invoice)}/cancel`,
+        "PATCH",
+        {
+          reason: reason.trim(),
+        }
+      );
+
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const cards = [
     {
       label: "Total Invoices",
-      value: stats.invoices,
+      value: stats.total ?? documents.length,
       icon: FileText,
     },
     {
-      label: "Quotations",
-      value: stats.quotations,
+      label: "Draft",
+      value: stats.draft ?? 0,
       icon: FileCheck2,
     },
     {
       label: "Total Billed",
-      value: formatMoney(stats.billed),
+      value: money(stats.totalInvoiced),
       icon: IndianRupee,
     },
     {
       label: "Amount Received",
-      value: formatMoney(stats.received),
+      value: money(stats.totalReceived),
       icon: Receipt,
     },
     {
       label: "Outstanding",
-      value: formatMoney(stats.outstanding),
+      value: money(stats.totalOutstanding),
       icon: Clock3,
     },
   ];
@@ -1088,7 +1302,9 @@ export default function Invoices() {
           <span className="invoices__eyebrow">
             BILLING MANAGEMENT
           </span>
-          <h1>Invoices & Quotations</h1>
+
+          <h1>Invoices &amp; Quotations</h1>
+
           <p>
             Create, manage and print professional
             billing documents.
@@ -1098,38 +1314,51 @@ export default function Invoices() {
         <button
           type="button"
           className="invoices__button invoices__button--primary"
-          onClick={openCreate}
+          onClick={() => void openForm()}
+          disabled={busy}
         >
           <Plus size={18} />
           New Document
         </button>
       </div>
 
-      {storageError && (
-        <div className="invoices__error" role="alert">
-          {storageError}
+      {error && (
+        <div
+          className="invoices__error"
+          role="alert"
+        >
+          {error}
         </div>
       )}
 
       <div className="invoices__stats">
-        {cards.map(({ label, value, icon: Icon }) => (
-          <div className="invoices__stat" key={label}>
-            <Icon size={21} />
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+        {cards.map(
+          ({ label, value, icon: Icon }) => (
+            <div
+              className="invoices__stat"
+              key={label}
+            >
+              <Icon size={21} />
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          )
+        )}
       </div>
 
       <section className="invoices__panel">
         <div className="invoices__panel-heading">
           <h2>All Documents</h2>
-          <p>Invoices, quotations and billing records.</p>
+          <p>
+            Invoices and billing records.
+            Quotations require a separate backend API.
+          </p>
         </div>
 
         <div className="invoices__toolbar">
           <div className="invoices__search">
             <Search size={18} />
+
             <input
               type="search"
               value={search}
@@ -1143,6 +1372,7 @@ export default function Invoices() {
 
           <div className="invoices__filters">
             <Filter size={17} />
+
             <select
               value={typeFilter}
               onChange={(event) =>
@@ -1151,8 +1381,15 @@ export default function Invoices() {
               aria-label="Filter document type"
             >
               <option value="All">All Types</option>
-              <option value="Invoice">Invoices</option>
-              <option value="Quotation">Quotations</option>
+              <option value="Invoice">
+                Invoices
+              </option>
+              <option
+                value="Quotation"
+                disabled
+              >
+                Quotations (not connected)
+              </option>
             </select>
 
             <select
@@ -1162,13 +1399,14 @@ export default function Invoices() {
               }
               aria-label="Filter document status"
             >
-              <option value="All">All Statuses</option>
-              {[
-                ...STATUSES,
-                "Overdue",
-                "Accepted",
-              ].map((status) => (
-                <option key={status}>{status}</option>
+              <option value="All">
+                All Statuses
+              </option>
+
+              {STATUSES.map((status) => (
+                <option key={status}>
+                  {status}
+                </option>
               ))}
             </select>
           </div>
@@ -1190,133 +1428,163 @@ export default function Invoices() {
             </thead>
 
             <tbody>
-              {filteredDocuments.map((document) => {
-                const totals = calculateTotals(document);
-                const status = getStatus(document, today);
-
-                return (
-                  <tr key={document.id}>
-                    <td>
-                      <div className="invoices__identity">
-                        <span className="invoices__avatar">
-                          {document.type === "Invoice" ? (
-                            <FileText size={18} />
-                          ) : (
-                            <FileCheck2 size={18} />
-                          )}
-                        </span>
-                        <div>
-                          <strong>{document.number}</strong>
-                          <small>{document.type}</small>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td>
-                      <div className="invoices__client">
-                        <strong>
-                          {document.business ||
-                            document.clientName}
-                        </strong>
-                        <small>
-                          {document.projectName || "—"}
-                        </small>
-                      </div>
-                    </td>
-
-                    <td>{formatDate(document.issueDate)}</td>
-                    <td>{formatDate(document.dueDate)}</td>
-
-                    <td className="invoices__amount">
-                      {formatMoney(totals.total)}
-                    </td>
-
-                    <td className="invoices__amount invoices__amount--pending">
-                      {document.type === "Invoice"
-                        ? formatMoney(totals.balance)
-                        : "—"}
-                    </td>
-
-                    <td>
-                      <span
-                        className={`invoices__badge invoices__badge--${status
-                          .toLowerCase()
-                          .replace(/\s+/g, "-")}`}
-                      >
-                        {status}
+              {filtered.map((invoice) => (
+                <tr key={idOf(invoice)}>
+                  <td>
+                    <div className="invoices__identity">
+                      <span className="invoices__avatar">
+                        <FileText size={18} />
                       </span>
-                    </td>
 
-                    <td>
-                      <div className="invoices__actions">
-                        <button
-                          type="button"
-                          onClick={() => setPreview(document)}
-                          title="Preview / Print"
-                          aria-label={`Preview ${document.number}`}
-                        >
-                          <Printer size={16} />
-                        </button>
+                      <div>
+                        <strong>
+                          {invoice.invoiceNumber}
+                        </strong>
+                        <small>Invoice</small>
+                      </div>
+                    </div>
+                  </td>
 
-                        <button
-                          type="button"
-                          onClick={() => openEdit(document)}
-                          title="Edit"
-                          aria-label={`Edit ${document.number}`}
-                        >
-                          <Pencil size={16} />
-                        </button>
+                  <td>
+                    <div className="invoices__client">
+                      <strong>
+                        {invoice.client?.company ||
+                          invoice.client?.name ||
+                          "Unknown client"}
+                      </strong>
 
-                        {document.type === "Quotation" && (
+                      <small>
+                        {invoice.project?.name || "—"}
+                      </small>
+                    </div>
+                  </td>
+
+                  <td>
+                    {dateText(invoice.issueDate)}
+                  </td>
+
+                  <td>
+                    {dateText(invoice.dueDate)}
+                  </td>
+
+                  <td className="invoices__amount">
+                    {money(invoice.grandTotal)}
+                  </td>
+
+                  <td className="invoices__amount invoices__amount--pending">
+                    {money(
+                      invoice.balanceDue ??
+                        Math.max(
+                          0,
+                          Number(invoice.grandTotal) -
+                            Number(invoice.paidAmount)
+                        )
+                    )}
+                  </td>
+
+                  <td>
+                    <span
+                      className={`invoices__badge invoices__badge--${invoice.status
+                        .toLowerCase()
+                        .replace(/\s+/g, "-")}`}
+                    >
+                      {invoice.status}
+                    </span>
+                  </td>
+
+                  <td>
+                    <div className="invoices__actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreview(invoice)
+                        }
+                        title="Preview / Print"
+                        aria-label={`Preview ${invoice.invoiceNumber}`}
+                      >
+                        <Printer size={16} />
+                      </button>
+
+                      {invoice.status === "Draft" && (
+                        <>
                           <button
                             type="button"
+                            disabled={busy}
                             onClick={() =>
-                              convertQuotation(document)
+                              void openForm(invoice)
                             }
-                            title="Convert to Invoice"
-                            aria-label={`Convert ${document.number} to invoice`}
+                            title="Edit"
+                            aria-label={`Edit ${invoice.invoiceNumber}`}
                           >
-                            <ArrowRightLeft size={16} />
+                            <Pencil size={16} />
                           </button>
-                        )}
 
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void issue(invoice)
+                            }
+                            title="Issue invoice"
+                          >
+                            <FileCheck2 size={16} />
+                          </button>
+                        </>
+                      )}
+
+                      {[
+                        "Draft",
+                        "Issued",
+                        "Overdue",
+                      ].includes(invoice.status) && (
                         <button
                           type="button"
+                          disabled={busy}
                           className="invoices__delete"
                           onClick={() =>
-                            deleteDocument(document)
+                            void cancel(invoice)
                           }
-                          title="Delete"
-                          aria-label={`Delete ${document.number}`}
+                          title="Cancel invoice"
                         >
-                          <Trash2 size={16} />
+                          <X size={16} />
                         </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
 
-              {filteredDocuments.length === 0 && (
+              {filtered.length === 0 && (
                 <tr>
                   <td colSpan={8}>
                     <div className="invoices__empty">
                       <FileText size={36} />
-                      <h3>No documents found</h3>
+
+                      <h3>
+                        {loading
+                          ? "Loading documents..."
+                          : "No documents found"}
+                      </h3>
+
                       <p>
-                        Create an invoice or quotation
-                        to get started.
+                        {loading
+                          ? "Fetching invoices from backend."
+                          : "Create an invoice to get started."}
                       </p>
-                      {documents.length === 0 && (
-                        <button
-                          type="button"
-                          className="invoices__button invoices__button--primary"
-                          onClick={openCreate}
-                        >
-                          <Plus size={16} />
-                          Create Document
-                        </button>
-                      )}
+
+                      {!loading &&
+                        documents.length === 0 && (
+                          <button
+                            type="button"
+                            className="invoices__button invoices__button--primary"
+                            onClick={() =>
+                              void openForm()
+                            }
+                          >
+                            <Plus size={16} />
+                            Create Document
+                          </button>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -1326,25 +1594,27 @@ export default function Invoices() {
         </div>
 
         <div className="invoices__table-footer">
-          Showing {filteredDocuments.length} of{" "}
+          Showing {filtered.length} of{" "}
           {documents.length} documents
         </div>
       </section>
 
       {modalOpen && (
         <DocumentModal
-          document={editingDocument}
+          invoice={editingDocument}
+          clients={clients}
+          projects={projects}
           onClose={() => {
             setModalOpen(false);
             setEditingDocument(null);
           }}
-          onSave={saveDocument}
+          onSave={save}
         />
       )}
 
       {preview && (
         <PrintableDocument
-          document={preview}
+          invoice={preview}
           onClose={() => setPreview(null)}
         />
       )}

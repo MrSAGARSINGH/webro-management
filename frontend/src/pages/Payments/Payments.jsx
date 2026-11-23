@@ -1,355 +1,186 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Plus,
-  Search,
-  Filter,
-  Wallet,
-  IndianRupee,
-  Clock3,
-  AlertTriangle,
-  CheckCircle2,
-  CreditCard,
-  Pencil,
-  Trash2,
-  X,
-  Building2,
-  ReceiptText,
-  History,
-  CalendarDays,
-  ArrowDownLeft,
+  Plus, Search, Filter, Wallet, IndianRupee, Clock3,
+  AlertTriangle, CheckCircle2, CreditCard, Pencil, X,
+  Building2, ReceiptText, History, CalendarDays, ArrowDownLeft,
 } from "lucide-react";
-
 import "./Payments.scss";
 
-const STORAGE_KEY = "webro-management-payments-v1";
+const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:5000/api").replace(/\/+$/, "");
 
-const METHODS = [
-  "UPI",
-  "Bank Transfer",
-  "Cash",
-  "Cheque",
-  "Card",
-  "Other",
-];
+const METHODS = ["UPI", "Bank Transfer", "Cash", "Cheque", "Credit Card", "Debit Card", "Payment Gateway", "Other"];
+const TYPES = ["Advance", "Milestone", "Final", "Maintenance", "Other"];
+const STATUSES = ["Pending", "Completed", "Failed", "Refunded", "Partially Refunded", "Cancelled"];
 
-const EMPTY_ACCOUNT = {
-  clientName: "",
-  business: "",
-  projectName: "",
-  contractAmount: "",
-  dueDate: "",
-  notes: "",
-};
-
-const EMPTY_PAYMENT = {
+const INITIAL_FORM = {
+  client: "",
+  project: "",
   amount: "",
-  paidAt: "",
-  method: "UPI",
-  reference: "",
+  paymentType: "Advance",
+  paymentMethod: "UPI",
+  transactionId: "",
+  referenceNumber: "",
+  gatewayProvider: "",
+  dueDate: "",
+  description: "",
   notes: "",
 };
 
-const money = (value) =>
-  new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-  }).format(Number(value) || 0);
+const getId = (value) => typeof value === "string" ? value : value?._id || value?.id || "";
+const money = (value) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 }).format(Number(value) || 0);
+const dateInput = (value) => value ? new Date(value).toISOString().slice(0, 10) : "";
+const formatDate = (value) => value ? new Date(value).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "Not set";
 
-const pad = (value) => String(value).padStart(2, "0");
-
-function todayKey() {
-  const date = new Date();
-
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
-}
-
-function formatDate(value) {
-  if (!value) return "Not set";
-
-  const date = new Date(`${value}T12:00:00`);
-
-  if (Number.isNaN(date.getTime())) return "Invalid date";
-
-  return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(date);
-}
-
-function readAccounts() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (account) =>
-            account &&
-            typeof account === "object" &&
-            typeof account.id === "string" &&
-            Array.isArray(account.payments)
-        )
-      : [];
-  } catch {
-    return [];
+async function request(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...options.headers,
+    },
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || data?.success !== true) {
+    const issues = Array.isArray(data?.errors) ? data.errors.map((e) => e.message).filter(Boolean).join("; ") : "";
+    throw new Error(issues || data?.message || `Request failed (${response.status})`);
   }
+  return data;
 }
 
-function getReceived(account) {
-  return account.payments.reduce(
-    (total, payment) =>
-      total + (Number(payment.amount) || 0),
-    0
-  );
+async function mutation(path, method, payload) {
+  const csrf = await request("/auth/csrf");
+  if (!csrf.csrfToken) throw new Error("CSRF token unavailable. Please sign in again.");
+  return request(path, {
+    method,
+    headers: { "X-CSRF-Token": csrf.csrfToken },
+    ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
+  });
 }
 
-function getBalance(account) {
-  return Math.max(
-    0,
-    (Number(account.contractAmount) || 0) -
-      getReceived(account)
-  );
+async function fetchAll(path, key) {
+  const output = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const separator = path.includes("?") ? "&" : "?";
+    const data = await request(`${path}${separator}page=${page}&limit=100`);
+    if (!Array.isArray(data[key])) throw new Error(`Unexpected ${key} response.`);
+    output.push(...data[key]);
+    totalPages = data.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+  return output;
 }
 
-function getStatus(account, today) {
-  const balance = getBalance(account);
-
-  if (balance <= 0) return "Paid";
-
-  if (account.dueDate && account.dueDate < today) {
-    return "Overdue";
-  }
-
-  if (getReceived(account) > 0) {
-    return "Partial";
-  }
-
-  return "Unpaid";
-}
-
-function AccountModal({ account, onClose, onSave }) {
-  const [form, setForm] = useState(() =>
-    account
-      ? {
-          ...EMPTY_ACCOUNT,
-          ...account,
-          contractAmount: String(
-            account.contractAmount ?? ""
-          ),
-        }
-      : EMPTY_ACCOUNT
-  );
-
+function PaymentModal({ payment, clients, projects, onClose, onSave }) {
+  const editing = Boolean(payment);
+  const [form, setForm] = useState(() => payment ? {
+    ...INITIAL_FORM,
+    dueDate: dateInput(payment.dueDate),
+    description: payment.description || "",
+    notes: payment.notes || "",
+  } : { ...INITIAL_FORM });
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    const onEscape = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-
-    document.addEventListener("keydown", onEscape);
-
-    return () =>
-      document.removeEventListener("keydown", onEscape);
-  }, [onClose]);
-
-  const handleChange = (event) => {
+  const change = (event) => {
     const { name, value } = event.target;
-
     setForm((previous) => ({
       ...previous,
       [name]: value,
+      ...(name === "client" ? { project: "" } : {}),
     }));
-
     setError("");
   };
 
-  const handleSubmit = (event) => {
+  const availableProjects = projects.filter((project) => getId(project.client) === form.client);
+
+  const submit = async (event) => {
     event.preventDefault();
+    if (saving) return;
 
-    const clientName = form.clientName.trim();
-    const projectName = form.projectName.trim();
-    const amount = Number(form.contractAmount);
+    let payload;
 
-    if (!clientName || !projectName) {
-      setError("Client and project names are required.");
-      return;
+    if (editing) {
+      payload = {
+        dueDate: form.dueDate ? new Date(`${form.dueDate}T12:00:00`).toISOString() : null,
+        description: form.description.trim(),
+        notes: form.notes.trim(),
+      };
+    } else {
+      const amount = Number(form.amount);
+      if (!form.client) { setError("Select a client."); return; }
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999 || Math.abs(Math.round(amount * 100) - amount * 100) > 0.000001) {
+        setError("Enter a valid amount with maximum two decimal places.");
+        return;
+      }
+      if (form.paymentMethod === "Payment Gateway" && !form.gatewayProvider.trim()) {
+        setError("Gateway provider is required.");
+        return;
+      }
+      payload = {
+        client: form.client,
+        project: form.project || null,
+        amount,
+        currency: "INR",
+        paymentType: form.paymentType,
+        paymentMethod: form.paymentMethod,
+        transactionId: form.transactionId.trim() || null,
+        referenceNumber: form.referenceNumber.trim() || null,
+        gatewayProvider: form.paymentMethod === "Payment Gateway" ? form.gatewayProvider.trim() : "",
+        gatewayPaymentId: null,
+        gatewayOrderId: null,
+        dueDate: form.dueDate ? new Date(`${form.dueDate}T12:00:00`).toISOString() : null,
+        description: form.description.trim(),
+        notes: form.notes.trim(),
+      };
     }
 
-    if (
-      form.contractAmount === "" ||
-      !Number.isFinite(amount) ||
-      amount <= 0 ||
-      amount > 1000000000 ||
-      !Number.isInteger(amount * 100)
-    ) {
-      setError("Enter a valid contract amount.");
-      return;
+    try {
+      setSaving(true);
+      await onSave(payload);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
     }
-
-    const alreadyReceived = account
-      ? getReceived(account)
-      : 0;
-
-    if (Math.round(amount * 100) <
-        Math.round(alreadyReceived * 100)) {
-      setError(
-        "Contract amount cannot be less than payments already received."
-      );
-      return;
-    }
-
-    onSave({
-      clientName,
-      business: form.business.trim(),
-      projectName,
-      contractAmount: amount,
-      dueDate: form.dueDate,
-      notes: form.notes.trim(),
-    });
   };
 
   return (
-    <div
-      className="payments__modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="payments__modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="payment-account-title"
-      >
+    <div className="payments__modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) onClose(); }}>
+      <section className="payments__modal" role="dialog" aria-modal="true" aria-labelledby="payment-modal-title">
         <div className="payments__modal-header">
           <div>
-            <h2 id="payment-account-title">
-              {account
-                ? "Edit Payment Account"
-                : "Create Payment Account"}
-            </h2>
-            <p>Set the contract value and payment deadline.</p>
+            <h2 id="payment-modal-title">{editing ? "Edit Payment Details" : "Create Payment"}</h2>
+            <p>{editing ? "Only non-financial fields can be updated." : "Create a pending payment record."}</p>
           </div>
-
-          <button
-            type="button"
-            className="payments__icon-button"
-            onClick={onClose}
-            aria-label="Close form"
-          >
-            <X size={19} />
-          </button>
+          <button type="button" className="payments__icon-button" onClick={onClose} disabled={saving} aria-label="Close"><X size={20} /></button>
         </div>
-
-        <form
-          className="payments__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="payments__form" onSubmit={submit}>
           <div className="payments__form-grid">
-            <label>
-              Client Name *
-              <input
-                name="clientName"
-                value={form.clientName}
-                onChange={handleChange}
-                maxLength={100}
-                placeholder="Client name"
-                required
-              />
-            </label>
-
-            <label>
-              Business / Company
-              <input
-                name="business"
-                value={form.business}
-                onChange={handleChange}
-                maxLength={120}
-                placeholder="Business name"
-              />
-            </label>
-
-            <label className="payments__form-full">
-              Project Name *
-              <input
-                name="projectName"
-                value={form.projectName}
-                onChange={handleChange}
-                maxLength={150}
-                placeholder="Website development"
-                required
-              />
-            </label>
-
-            <label>
-              Contract Amount (₹) *
-              <input
-                name="contractAmount"
-                type="number"
-                min="0.01"
-                max="1000000000"
-                step="0.01"
-                value={form.contractAmount}
-                onChange={handleChange}
-                required
-              />
-            </label>
-
-            <label>
-              Payment Due Date
-              <input
-                name="dueDate"
-                type="date"
-                value={form.dueDate}
-                onChange={handleChange}
-              />
-            </label>
-
-            <label className="payments__form-full">
-              Notes
-              <textarea
-                name="notes"
-                value={form.notes}
-                onChange={handleChange}
-                maxLength={2000}
-                rows={3}
-                placeholder="Payment terms or contract notes..."
-              />
-            </label>
+            {!editing && (
+              <>
+                <label>Client *<select name="client" value={form.client} onChange={change} required><option value="">Select client</option>{clients.map((client) => <option key={getId(client)} value={getId(client)}>{client.name}{client.company ? ` — ${client.company}` : ""}</option>)}</select></label>
+                <label>Project<select name="project" value={form.project} onChange={change}><option value="">No project</option>{availableProjects.map((project) => <option key={getId(project)} value={getId(project)}>{project.name || project.title}</option>)}</select></label>
+                <label>Amount (₹) *<input name="amount" type="number" min="0.01" step="0.01" value={form.amount} onChange={change} required /></label>
+                <label>Payment Type<select name="paymentType" value={form.paymentType} onChange={change}>{TYPES.map((type) => <option key={type}>{type}</option>)}</select></label>
+                <label>Payment Method<select name="paymentMethod" value={form.paymentMethod} onChange={change}>{METHODS.map((method) => <option key={method}>{method}</option>)}</select></label>
+                <label>Transaction ID<input name="transactionId" value={form.transactionId} onChange={change} maxLength={150} placeholder="Optional" /></label>
+                <label>Reference Number<input name="referenceNumber" value={form.referenceNumber} onChange={change} maxLength={100} placeholder="Optional" /></label>
+                {form.paymentMethod === "Payment Gateway" && <label>Gateway Provider *<input name="gatewayProvider" value={form.gatewayProvider} onChange={change} maxLength={100} required placeholder="Razorpay, Stripe..." /></label>}
+              </>
+            )}
+            <label>Due Date<input name="dueDate" type="date" value={form.dueDate} onChange={change} /></label>
+            <label className="payments__form-full">Description<textarea name="description" value={form.description} onChange={change} rows={2} maxLength={2000} /></label>
+            <label className="payments__form-full">Notes<textarea name="notes" value={form.notes} onChange={change} rows={3} maxLength={5000} /></label>
           </div>
-
-          {error && (
-            <p className="payments__form-error" role="alert">
-              {error}
-            </p>
-          )}
-
+          {error && <p className="payments__form-error" role="alert">{error}</p>}
           <div className="payments__modal-actions">
-            <button
-              type="button"
-              className="payments__button payments__button--secondary"
-              onClick={onClose}
-            >
-              Cancel
-            </button>
-
-            <button
-              type="submit"
-              className="payments__button payments__button--primary"
-            >
-              {account ? "Save Changes" : "Create Account"}
-            </button>
+            <button type="button" className="payments__button payments__button--secondary" onClick={onClose} disabled={saving}>Cancel</button>
+            <button type="submit" className="payments__button payments__button--primary" disabled={saving}>{saving ? "Saving..." : editing ? "Save Changes" : "Create Payment"}</button>
           </div>
         </form>
       </section>
@@ -357,230 +188,83 @@ function AccountModal({ account, onClose, onSave }) {
   );
 }
 
-function InstallmentModal({
-  account,
-  payment,
-  onClose,
-  onSave,
-}) {
-  const [form, setForm] = useState(() =>
-    payment
-      ? {
-          ...EMPTY_PAYMENT,
-          ...payment,
-          amount: String(payment.amount),
-        }
-      : {
-          ...EMPTY_PAYMENT,
-          paidAt: todayKey(),
-        }
-  );
-
+function ActionModal({ payment, action, onClose, onSubmit }) {
+  const [reason, setReason] = useState("");
+  const [amount, setAmount] = useState("");
+  const [referenceNumber, setReferenceNumber] = useState("");
+  const [notes, setNotes] = useState("");
+  const [paymentDate, setPaymentDate] = useState(() => {
+    const now = new Date();
+    const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 16);
+  });
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const remaining = Math.round((Number(payment.amount) - Number(payment.refundedAmount || 0)) * 100) / 100;
 
-  useEffect(() => {
-    const onEscape = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-
-    document.addEventListener("keydown", onEscape);
-
-    return () =>
-      document.removeEventListener("keydown", onEscape);
-  }, [onClose]);
-
-  const handleChange = (event) => {
-    const { name, value } = event.target;
-
-    setForm((previous) => ({
-      ...previous,
-      [name]: value,
-    }));
-
-    setError("");
-  };
-
-  const handleSubmit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-
-    const amount = Number(form.amount);
-
-    if (
-      form.amount === "" ||
-      !Number.isFinite(amount) ||
-      amount <= 0 ||
-      !Number.isInteger(amount * 100)
-    ) {
-      setError("Enter a valid payment amount.");
+    let payload;
+    if (action === "verify") {
+      const date = new Date(paymentDate);
+      if (Number.isNaN(date.getTime())) { setError("Enter a valid payment date."); return; }
+      payload = { paymentDate: date.toISOString(), notes: notes.trim() };
+    } else if (action === "refund") {
+      const value = Number(amount);
+      if (!Number.isFinite(value) || value <= 0 || value > remaining || Math.abs(Math.round(value * 100) - value * 100) > 0.000001) {
+        setError(`Refund amount must be between ₹0.01 and ${money(remaining)}.`);
+        return;
+      }
+      if (!referenceNumber.trim()) { setError("Refund reference is required."); return; }
+      payload = { amount: value, reason: reason.trim(), referenceNumber: referenceNumber.trim() };
+    } else {
+      payload = { reason: reason.trim() };
+    }
+    if (action !== "verify" && reason.trim().length < 3) {
+      setError("Reason must contain at least 3 characters.");
       return;
     }
-
-    if (!form.paidAt || form.paidAt > todayKey()) {
-      setError("Payment date cannot be in the future.");
-      return;
+    try {
+      setSaving(true);
+      await onSubmit(action, payload);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
     }
-
-    const otherPayments = account.payments
-      .filter((item) => item.id !== payment?.id)
-      .reduce(
-        (sum, item) =>
-          sum + Math.round(Number(item.amount) * 100),
-        0
-      );
-
-    const contractCents = Math.round(
-      Number(account.contractAmount) * 100
-    );
-
-    if (
-      otherPayments + Math.round(amount * 100) >
-      contractCents
-    ) {
-      setError(
-        `Payment exceeds the remaining balance of ${money(
-          (contractCents - otherPayments) / 100
-        )}.`
-      );
-      return;
-    }
-
-    onSave({
-      amount,
-      paidAt: form.paidAt,
-      method: form.method,
-      reference: form.reference.trim(),
-      notes: form.notes.trim(),
-    });
   };
 
   return (
-    <div
-      className="payments__modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <section
-        className="payments__modal payments__modal--small"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="installment-modal-title"
-      >
+    <div className="payments__modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) onClose(); }}>
+      <section className="payments__modal payments__modal--small" role="dialog" aria-modal="true" aria-labelledby="payment-action-title">
         <div className="payments__modal-header">
-          <div>
-            <h2 id="installment-modal-title">
-              {payment ? "Edit Payment" : "Record Payment"}
-            </h2>
-            <p>{account.clientName} — {account.projectName}</p>
-          </div>
-
-          <button
-            type="button"
-            className="payments__icon-button"
-            onClick={onClose}
-            aria-label="Close payment form"
-          >
-            <X size={19} />
-          </button>
+          <div><h2 id="payment-action-title">{action === "verify" ? "Verify Payment" : action === "refund" ? "Refund Payment" : action === "fail" ? "Mark Payment Failed" : "Cancel Payment"}</h2><p>{payment.client?.name || "Client"} — {money(payment.amount)}</p></div>
+          <button type="button" className="payments__icon-button" onClick={onClose} disabled={saving} aria-label="Close"><X size={20} /></button>
         </div>
-
-        <form
-          className="payments__form"
-          onSubmit={handleSubmit}
-        >
-          <div className="payments__balance-note">
-            <span>Current Outstanding</span>
-            <strong>{money(getBalance(account))}</strong>
-          </div>
-
+        <form className="payments__form" onSubmit={submit}>
           <div className="payments__form-grid">
-            <label>
-              Amount Received (₹) *
-              <input
-                name="amount"
-                type="number"
-                min="0.01"
-                step="0.01"
-                value={form.amount}
-                onChange={handleChange}
-                required
-              />
-            </label>
-
-            <label>
-              Payment Date *
-              <input
-                name="paidAt"
-                type="date"
-                value={form.paidAt}
-                onChange={handleChange}
-                max={todayKey()}
-                required
-              />
-            </label>
-
-            <label>
-              Payment Method
-              <select
-                name="method"
-                value={form.method}
-                onChange={handleChange}
-              >
-                {METHODS.map((method) => (
-                  <option key={method} value={method}>
-                    {method}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Transaction Reference
-              <input
-                name="reference"
-                value={form.reference}
-                onChange={handleChange}
-                maxLength={120}
-                placeholder="UTR / transaction ID"
-              />
-            </label>
-
-            <label className="payments__form-full">
-              Payment Notes
-              <textarea
-                name="notes"
-                value={form.notes}
-                onChange={handleChange}
-                maxLength={2000}
-                rows={3}
-                placeholder="Additional payment details..."
-              />
-            </label>
+            {action === "verify" ? (
+              <>
+                <label>Payment Date *<input type="datetime-local" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} required /></label>
+                <label className="payments__form-full">Verification Notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={5000} rows={3} /></label>
+              </>
+            ) : (
+              <>
+                {action === "refund" && (
+                  <>
+                    <div className="payments__balance-note">Available for refund: {money(remaining)}</div>
+                    <label>Refund Amount *<input type="number" min="0.01" max={remaining} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required /></label>
+                    <label>Refund Reference *<input value={referenceNumber} onChange={(e) => setReferenceNumber(e.target.value)} maxLength={100} required /></label>
+                  </>
+                )}
+                <label className="payments__form-full">Reason *<textarea value={reason} onChange={(e) => setReason(e.target.value)} minLength={3} maxLength={1000} rows={3} required /></label>
+              </>
+            )}
           </div>
-
-          {error && (
-            <p className="payments__form-error" role="alert">
-              {error}
-            </p>
-          )}
-
+          {error && <p className="payments__form-error" role="alert">{error}</p>}
           <div className="payments__modal-actions">
-            <button
-              type="button"
-              className="payments__button payments__button--secondary"
-              onClick={onClose}
-            >
-              Cancel
-            </button>
-
-            <button
-              type="submit"
-              className="payments__button payments__button--primary"
-            >
-              {payment ? "Save Changes" : "Record Payment"}
-            </button>
+            <button type="button" className="payments__button payments__button--secondary" onClick={onClose} disabled={saving}>Cancel</button>
+            <button type="submit" className="payments__button payments__button--primary" disabled={saving}>{saving ? "Processing..." : "Confirm"}</button>
           </div>
         </form>
       </section>
@@ -589,291 +273,120 @@ function InstallmentModal({
 }
 
 export default function Payments() {
-  const [accounts, setAccounts] = useState(readAccounts);
+  const [payments, setPayments] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [stats, setStats] = useState(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [accountModal, setAccountModal] = useState(null);
-  const [installmentModal, setInstallmentModal] =
-    useState(null);
-  const [historyAccountId, setHistoryAccountId] =
-    useState(null);
-  const [storageError, setStorageError] = useState("");
-  const [today, setToday] = useState(todayKey);
+  const [paymentModal, setPaymentModal] = useState(null);
+  const [actionModal, setActionModal] = useState(null);
+  const [historyPayment, setHistoryPayment] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [revision, setRevision] = useState(0);
+
+  const refresh = useCallback(() => setRevision((value) => value + 1), []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(accounts)
-      );
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save payments in browser storage."
-      );
+    let active = true;
+    async function load() {
+      setLoading(true);
+      setError("");
+      try {
+        const [records, summary] = await Promise.all([
+          fetchAll("/payments", "payments"),
+          request("/payments/stats"),
+        ]);
+        if (active) {
+          setPayments(records);
+          setStats(summary.stats);
+        }
+      } catch (err) {
+        if (active) setError(err.message);
+      } finally {
+        if (active) setLoading(false);
+      }
     }
-  }, [accounts]);
+    void load();
+    return () => { active = false; };
+  }, [revision]);
 
-  useEffect(() => {
-    const refresh = () => setToday(todayKey());
-    const interval = window.setInterval(refresh, 60_000);
-
-    window.addEventListener("focus", refresh);
-
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
-  }, []);
-
-  const stats = useMemo(() => {
-    const contract = accounts.reduce(
-      (sum, account) =>
-        sum + (Number(account.contractAmount) || 0),
-      0
-    );
-
-    const received = accounts.reduce(
-      (sum, account) => sum + getReceived(account),
-      0
-    );
-
-    const overdue = accounts.reduce(
-      (sum, account) =>
-        sum +
-        (getStatus(account, today) === "Overdue"
-          ? getBalance(account)
-          : 0),
-      0
-    );
-
-    return {
-      accounts: accounts.length,
-      contract,
-      received,
-      pending: Math.max(0, contract - received),
-      overdue,
-    };
-  }, [accounts, today]);
-
-  const filteredAccounts = useMemo(() => {
+  const filteredPayments = useMemo(() => {
     const query = search.trim().toLowerCase();
-
-    return accounts
-      .filter((account) => {
-        const matchesSearch = [
-          account.clientName,
-          account.business,
-          account.projectName,
-        ].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query)
-        );
-
-        return (
-          matchesSearch &&
-          (statusFilter === "All" ||
-            getStatus(account, today) === statusFilter)
-        );
-      })
-      .sort((a, b) =>
-        (a.dueDate || "9999-12-31").localeCompare(
-          b.dueDate || "9999-12-31"
-        )
-      );
-  }, [accounts, search, statusFilter, today]);
-
-  const historyAccount = accounts.find(
-    (account) => account.id === historyAccountId
-  );
-
-  const history = useMemo(() => {
-    if (!historyAccount) return [];
-
-    return [...historyAccount.payments].sort(
-      (a, b) =>
-        b.paidAt.localeCompare(a.paidAt) ||
-        b.createdAt.localeCompare(a.createdAt)
+    return payments.filter((payment) =>
+      (statusFilter === "All" || payment.status === statusFilter) &&
+      [payment.client?.name, payment.client?.company, payment.project?.name, payment.transactionId, payment.referenceNumber, payment.description]
+        .some((value) => String(value || "").toLowerCase().includes(query))
     );
-  }, [historyAccount]);
+  }, [payments, search, statusFilter]);
 
-  const saveAccount = (form) => {
-    const timestamp = new Date().toISOString();
+  const openPaymentModal = async (payment = null) => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (!payment) {
+        const [clientList, projectList] = await Promise.all([
+          fetchAll("/clients", "clients"),
+          fetchAll("/projects", "projects"),
+        ]);
+        setClients(clientList);
+        setProjects(projectList);
+      }
+      setPaymentModal(payment || "new");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
-    if (accountModal?.account) {
-      setAccounts((previous) =>
-        previous.map((account) =>
-          account.id === accountModal.account.id
-            ? {
-                ...account,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : account
-        )
-      );
+  const savePayment = async (payload) => {
+    if (paymentModal === "new") {
+      await mutation("/payments", "POST", payload);
     } else {
-      setAccounts((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          payments: [],
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+      await mutation(`/payments/${getId(paymentModal)}`, "PATCH", payload);
     }
-
-    setAccountModal(null);
+    setPaymentModal(null);
+    refresh();
   };
 
-  const deleteAccount = (account) => {
-    if (
-      !window.confirm(
-        `Delete "${account.clientName}" payment account and all its transactions?`
-      )
-    ) {
-      return;
-    }
-
-    setAccounts((previous) =>
-      previous.filter((item) => item.id !== account.id)
-    );
-
-    if (historyAccountId === account.id) {
-      setHistoryAccountId(null);
-    }
-  };
-
-  const saveInstallment = (form) => {
-    if (!installmentModal) return;
-
-    const { accountId, payment } = installmentModal;
-    const timestamp = new Date().toISOString();
-
-    setAccounts((previous) =>
-      previous.map((account) => {
-        if (account.id !== accountId) return account;
-
-        const payments = payment
-          ? account.payments.map((item) =>
-              item.id === payment.id
-                ? {
-                    ...item,
-                    ...form,
-                    updatedAt: timestamp,
-                  }
-                : item
-            )
-          : [
-              ...account.payments,
-              {
-                ...form,
-                id: crypto.randomUUID(),
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              },
-            ];
-
-        return {
-          ...account,
-          payments,
-          updatedAt: timestamp,
-        };
-      })
-    );
-
-    setInstallmentModal(null);
-  };
-
-  const deleteInstallment = (accountId, payment) => {
-    if (
-      !window.confirm(
-        `Delete payment of ${money(payment.amount)}?`
-      )
-    ) {
-      return;
-    }
-
-    setAccounts((previous) =>
-      previous.map((account) =>
-        account.id === accountId
-          ? {
-              ...account,
-              payments: account.payments.filter(
-                (item) => item.id !== payment.id
-              ),
-              updatedAt: new Date().toISOString(),
-            }
-          : account
-      )
-    );
+  const executeAction = async (action, payload) => {
+    const paymentId = getId(actionModal.payment);
+    const route = action === "refund" ? "refund" : action;
+    await mutation(`/payments/${paymentId}/${route}`, action === "refund" ? "POST" : "PATCH", payload);
+    setActionModal(null);
+    refresh();
   };
 
   const cards = [
-    {
-      label: "Payment Accounts",
-      value: stats.accounts,
-      icon: Wallet,
-    },
-    {
-      label: "Total Contract Value",
-      value: money(stats.contract),
-      icon: IndianRupee,
-    },
-    {
-      label: "Payments Received",
-      value: money(stats.received),
-      icon: CheckCircle2,
-    },
-    {
-      label: "Pending Balance",
-      value: money(stats.pending),
-      icon: Clock3,
-    },
-    {
-      label: "Overdue Amount",
-      value: money(stats.overdue),
-      icon: AlertTriangle,
-    },
+    { label: "Total Payments", value: stats?.total ?? 0, Icon: Wallet },
+    { label: "Gross Revenue", value: money(stats?.grossRevenue), Icon: IndianRupee },
+    { label: "Net Revenue", value: money(stats?.netRevenue), Icon: CheckCircle2 },
+    { label: "Pending Amount", value: money(stats?.pendingAmount), Icon: Clock3 },
+    { label: "Overdue Amount", value: money(stats?.overdueAmount), Icon: AlertTriangle },
+    { label: "Total Refunded", value: money(stats?.totalRefunded), Icon: ArrowDownLeft },
   ];
 
   return (
     <div className="payments">
       <div className="payments__header">
         <div>
-          <span className="payments__eyebrow">
-            FINANCIAL MANAGEMENT
-          </span>
-          <h1>Payment Management</h1>
-          <p>
-            Track client contracts, installments,
-            outstanding balances and payment history.
-          </p>
+          <span className="payments__eyebrow">FINANCIAL MANAGEMENT</span>
+          <h1>Payments Management</h1>
+          <p>Track transactions, verify payments and manage refunds.</p>
         </div>
-
-        <button
-          type="button"
-          className="payments__button payments__button--primary"
-          onClick={() =>
-            setAccountModal({ account: null })
-          }
-        >
-          <Plus size={18} />
-          New Payment Account
+        <button type="button" className="payments__button payments__button--primary" onClick={() => void openPaymentModal()} disabled={busy}>
+          <Plus size={18} /> Create Payment
         </button>
       </div>
 
-      {storageError && (
-        <div className="payments__error" role="alert">
-          {storageError}
-        </div>
-      )}
+      {error && <div className="payments__error" role="alert">{error}</div>}
 
       <div className="payments__stats">
-        {cards.map(({ label, value, icon: Icon }) => (
+        {cards.map(({ label, value, Icon }) => (
           <div className="payments__stat" key={label}>
             <Icon size={21} />
             <span>{label}</span>
@@ -884,45 +397,18 @@ export default function Payments() {
 
       <section className="payments__panel">
         <div className="payments__panel-heading">
-          <div>
-            <h2>
-              <ReceiptText size={19} />
-              Client Payment Accounts
-            </h2>
-            <p>
-              Contract amounts and installment tracking.
-            </p>
-          </div>
+          <div><h2><ReceiptText size={19} /> Payment Records</h2><p>All recorded transactions</p></div>
         </div>
-
         <div className="payments__toolbar">
           <div className="payments__search">
             <Search size={18} />
-            <input
-              type="search"
-              value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
-              placeholder="Search client, business, project..."
-              aria-label="Search payment accounts"
-            />
+            <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search client, project, reference..." />
           </div>
-
           <div className="payments__filters">
             <Filter size={17} />
-            <select
-              value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value)
-              }
-              aria-label="Filter by payment status"
-            >
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="All">All Statuses</option>
-              <option value="Paid">Paid</option>
-              <option value="Partial">Partial</option>
-              <option value="Unpaid">Unpaid</option>
-              <option value="Overdue">Overdue</option>
+              {STATUSES.map((status) => <option key={status}>{status}</option>)}
             </select>
           </div>
         </div>
@@ -932,155 +418,58 @@ export default function Payments() {
             <thead>
               <tr>
                 <th>Client / Project</th>
-                <th>Contract Value</th>
-                <th>Received</th>
-                <th>Pending</th>
+                <th>Amount</th>
+                <th>Method</th>
+                <th>Type</th>
                 <th>Due Date</th>
                 <th>Status</th>
-                <th>Installments</th>
+                <th>Reference</th>
                 <th>Actions</th>
               </tr>
             </thead>
-
             <tbody>
-              {filteredAccounts.map((account) => {
-                const received = getReceived(account);
-                const pending = getBalance(account);
-                const status = getStatus(account, today);
-
-                return (
-                  <tr key={account.id}>
-                    <td>
-                      <div className="payments__identity">
-                        <span className="payments__avatar">
-                          <Building2 size={18} />
-                        </span>
-
-                        <div>
-                          <strong>
-                            {account.clientName}
-                          </strong>
-                          <small>
-                            {account.business ||
-                              account.projectName}
-                          </small>
-                          {account.business && (
-                            <small>{account.projectName}</small>
-                          )}
-                        </div>
+              {filteredPayments.map((payment) => (
+                <tr key={getId(payment)}>
+                  <td>
+                    <div className="payments__identity">
+                      <span className="payments__avatar"><Building2 size={17} /></span>
+                      <div>
+                        <strong>{payment.client?.name || "Unknown Client"}</strong>
+                        <small>{payment.project?.name || payment.client?.company || "No project"}</small>
                       </div>
-                    </td>
-
-                    <td className="payments__amount">
-                      {money(account.contractAmount)}
-                    </td>
-
-                    <td className="payments__amount payments__amount--received">
-                      {money(received)}
-                    </td>
-
-                    <td className="payments__amount payments__amount--pending">
-                      {money(pending)}
-                    </td>
-
-                    <td>
-                      <span className="payments__date">
-                        <CalendarDays size={14} />
-                        {formatDate(account.dueDate)}
-                      </span>
-                    </td>
-
-                    <td>
-                      <span
-                        className={`payments__badge payments__badge--${status.toLowerCase()}`}
-                      >
-                        {status}
-                      </span>
-                    </td>
-
-                    <td>
-                      <button
-                        type="button"
-                        className="payments__history-link"
-                        onClick={() =>
-                          setHistoryAccountId(account.id)
-                        }
-                      >
-                        <History size={15} />
-                        {account.payments.length} payments
-                      </button>
-                    </td>
-
-                    <td>
-                      <div className="payments__actions">
-                        <button
-                          type="button"
-                          className="payments__record"
-                          onClick={() =>
-                            setInstallmentModal({
-                              accountId: account.id,
-                              payment: null,
-                            })
-                          }
-                          disabled={pending <= 0}
-                          title="Record installment"
-                          aria-label={`Record payment for ${account.clientName}`}
-                        >
-                          <Plus size={16} />
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setAccountModal({ account })
-                          }
-                          title="Edit account"
-                          aria-label={`Edit ${account.clientName}`}
-                        >
-                          <Pencil size={16} />
-                        </button>
-
-                        <button
-                          type="button"
-                          className="payments__delete"
-                          onClick={() => deleteAccount(account)}
-                          title="Delete account"
-                          aria-label={`Delete ${account.clientName}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-
-              {filteredAccounts.length === 0 && (
+                    </div>
+                  </td>
+                  <td className="payments__amount">{money(payment.amount)}</td>
+                  <td><CreditCard size={14} /> {payment.paymentMethod}</td>
+                  <td>{payment.paymentType}</td>
+                  <td><span className="payments__date"><CalendarDays size={14} /> {formatDate(payment.dueDate)}</span></td>
+                  <td><span className={`payments__badge payments__badge--${payment.status.toLowerCase().replace(/\s+/g, "-")}`}>{payment.status}</span></td>
+                  <td>{payment.referenceNumber || payment.transactionId || "—"}</td>
+                  <td>
+                    <div className="payments__actions">
+                      <button type="button" title="Edit details" onClick={() => void openPaymentModal(payment)} disabled={busy}><Pencil size={16} /></button>
+                      {payment.status === "Pending" && (
+                        <>
+                          <button type="button" title="Verify payment" onClick={() => setActionModal({ payment, action: "verify" })} disabled={busy}><CheckCircle2 size={16} /></button>
+                          <button type="button" title="Mark failed" onClick={() => setActionModal({ payment, action: "fail" })} disabled={busy}><AlertTriangle size={16} /></button>
+                          <button type="button" title="Cancel payment" onClick={() => setActionModal({ payment, action: "cancel" })} disabled={busy}><X size={16} /></button>
+                        </>
+                      )}
+                      {["Completed", "Partially Refunded"].includes(payment.status) && (
+                        <button type="button" title="Refund payment" onClick={() => setActionModal({ payment, action: "refund" })} disabled={busy}><ArrowDownLeft size={16} /></button>
+                      )}
+                      <button type="button" title="View payment details" onClick={() => setHistoryPayment(payment)}><History size={16} /></button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filteredPayments.length === 0 && (
                 <tr>
                   <td colSpan={8}>
                     <div className="payments__empty">
                       <Wallet size={36} />
-                      <h3>No payment accounts found</h3>
-                      <p>
-                        {accounts.length === 0
-                          ? "Create a payment account to start tracking receipts."
-                          : "Try adjusting your search or filters."}
-                      </p>
-
-                      {accounts.length === 0 && (
-                        <button
-                          type="button"
-                          className="payments__button payments__button--primary"
-                          onClick={() =>
-                            setAccountModal({
-                              account: null,
-                            })
-                          }
-                        >
-                          <Plus size={16} />
-                          Create Account
-                        </button>
-                      )}
+                      <h3>{loading ? "Loading payments..." : "No payments found"}</h3>
+                      <p>{loading ? "Fetching payment records." : "Create a payment or adjust your filters."}</p>
                     </div>
                   </td>
                 </tr>
@@ -1088,188 +477,42 @@ export default function Payments() {
             </tbody>
           </table>
         </div>
-
-        <div className="payments__table-footer">
-          Showing {filteredAccounts.length} of{" "}
-          {accounts.length} accounts
-        </div>
+        <div className="payments__table-footer">Showing {filteredPayments.length} of {payments.length} payments</div>
       </section>
 
-      {/* PAYMENT HISTORY */}
-
-      {historyAccount && (
+      {historyPayment && (
         <section className="payments__panel">
           <div className="payments__history-heading">
-            <div>
-              <h2>
-                <History size={19} />
-                Payment History
-              </h2>
-              <p>
-                {historyAccount.clientName} —{" "}
-                {historyAccount.projectName}
-              </p>
-            </div>
-
-            <button
-              type="button"
-              className="payments__icon-button"
-              onClick={() => setHistoryAccountId(null)}
-              aria-label="Close payment history"
-            >
-              <X size={19} />
-            </button>
+            <h2><History size={19} /> Payment Details</h2>
+            <button type="button" className="payments__icon-button" onClick={() => setHistoryPayment(null)} aria-label="Close details"><X size={18} /></button>
           </div>
-
           <div className="payments__history-summary">
-            <div>
-              <span>Contract</span>
-              <strong>
-                {money(historyAccount.contractAmount)}
-              </strong>
-            </div>
-            <div>
-              <span>Received</span>
-              <strong>
-                {money(getReceived(historyAccount))}
-              </strong>
-            </div>
-            <div>
-              <span>Outstanding</span>
-              <strong>
-                {money(getBalance(historyAccount))}
-              </strong>
-            </div>
+            <div><span>Client</span><strong>{historyPayment.client?.name || "—"}</strong></div>
+            <div><span>Amount</span><strong>{money(historyPayment.amount)}</strong></div>
+            <div><span>Refunded</span><strong>{money(historyPayment.refundedAmount)}</strong></div>
+            <div><span>Payment Date</span><strong>{formatDate(historyPayment.paymentDate)}</strong></div>
+            <div><span>Status</span><strong>{historyPayment.status}</strong></div>
+            <div><span>Notes</span><strong>{historyPayment.notes || "—"}</strong></div>
           </div>
-
-          <div className="payments__history-toolbar">
-            <h3>Transactions</h3>
-
-            <button
-              type="button"
-              className="payments__button payments__button--primary"
-              onClick={() =>
-                setInstallmentModal({
-                  accountId: historyAccount.id,
-                  payment: null,
-                })
-              }
-              disabled={getBalance(historyAccount) <= 0}
-            >
-              <Plus size={16} />
-              Add Payment
-            </button>
-          </div>
-
-          {history.length === 0 ? (
-            <div className="payments__empty">
-              <CreditCard size={32} />
-              <h3>No transactions yet</h3>
-              <p>
-                Record an installment to build payment history.
-              </p>
-            </div>
-          ) : (
-            <div className="payments__table-wrap">
-              <table className="payments__table payments__table--history">
-                <thead>
-                  <tr>
-                    <th>Payment Date</th>
-                    <th>Amount</th>
-                    <th>Method</th>
-                    <th>Reference</th>
-                    <th>Notes</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {history.map((payment) => (
-                    <tr key={payment.id}>
-                      <td>
-                        <span className="payments__date">
-                          <CalendarDays size={14} />
-                          {formatDate(payment.paidAt)}
-                        </span>
-                      </td>
-
-                      <td>
-                        <span className="payments__transaction-amount">
-                          <ArrowDownLeft size={15} />
-                          {money(payment.amount)}
-                        </span>
-                      </td>
-
-                      <td>{payment.method}</td>
-
-                      <td>{payment.reference || "—"}</td>
-
-                      <td>
-                        <span className="payments__notes">
-                          {payment.notes || "—"}
-                        </span>
-                      </td>
-
-                      <td>
-                        <div className="payments__actions">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setInstallmentModal({
-                                accountId: historyAccount.id,
-                                payment,
-                              })
-                            }
-                            title="Edit payment"
-                            aria-label="Edit payment"
-                          >
-                            <Pencil size={16} />
-                          </button>
-
-                          <button
-                            type="button"
-                            className="payments__delete"
-                            onClick={() =>
-                              deleteInstallment(
-                                historyAccount.id,
-                                payment
-                              )
-                            }
-                            title="Delete payment"
-                            aria-label="Delete payment"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </section>
       )}
 
-      {accountModal && (
-        <AccountModal
-          account={accountModal.account}
-          onClose={() => setAccountModal(null)}
-          onSave={saveAccount}
+      {paymentModal && (
+        <PaymentModal
+          payment={paymentModal === "new" ? null : paymentModal}
+          clients={clients}
+          projects={projects}
+          onClose={() => setPaymentModal(null)}
+          onSave={savePayment}
         />
       )}
 
-      {installmentModal && (
-        <InstallmentModal
-          account={
-            accounts.find(
-              (account) =>
-                account.id === installmentModal.accountId
-            )
-          }
-          payment={installmentModal.payment}
-          onClose={() => setInstallmentModal(null)}
-          onSave={saveInstallment}
+      {actionModal && (
+        <ActionModal
+          payment={actionModal.payment}
+          action={actionModal.action}
+          onClose={() => setActionModal(null)}
+          onSubmit={executeAction}
         />
       )}
     </div>

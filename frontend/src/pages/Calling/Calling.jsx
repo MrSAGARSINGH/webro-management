@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Phone,
   PhoneCall,
@@ -21,36 +21,55 @@ import {
 
 import "./Calling.scss";
 
-const STORAGE_KEY = "webro-management-calling-v1";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
-const OUTCOMES = [
-  "Connected",
+const STATUSES = [
+  "Completed",
   "No Answer",
   "Busy",
-  "Interested",
-  "Callback Requested",
-  "Not Interested",
+  "Failed",
+  "Cancelled",
 ];
 
-const REFERENCES = ["Lead", "Client", "Other"];
+const OUTCOMES = [
+  "Interested",
+  "Not Interested",
+  "Callback Requested",
+  "Follow Up Required",
+  "Meeting Scheduled",
+  "Converted",
+  "No Response",
+  "Other",
+];
 
 const EMPTY_FORM = {
-  contactName: "",
-  business: "",
-  phone: "",
-  referenceType: "Lead",
-  referenceName: "",
-  employee: "",
-  outcome: "Connected",
-  callAt: "",
-  duration: "",
-  nextCallback: "",
+  contactType: "Lead",
+  referenceId: "",
+  direction: "Outgoing",
+  status: "Completed",
+  outcome: "Other",
+  durationSeconds: "0",
+  calledAt: "",
+  nextFollowUp: "",
   notes: "",
 };
 
-const pad = (number) => String(number).padStart(2, "0");
+const getId = (value) => {
+  if (typeof value === "string") return value;
+  return value?._id || value?.id || "";
+};
 
-function toLocalInputValue(date = new Date()) {
+const pad = (value) => String(value).padStart(2, "0");
+
+function toLocalInputValue(value = new Date()) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
   return [
     date.getFullYear(),
     "-",
@@ -64,102 +83,146 @@ function toLocalInputValue(date = new Date()) {
   ].join("");
 }
 
-function parseLocalDateTime(value) {
-  if (typeof value !== "string") return null;
+function formatDate(value) {
+  if (!value) return "Not scheduled";
 
   const date = new Date(value);
 
-  return Number.isNaN(date.getTime()) ? null : date;
-}
+  if (Number.isNaN(date.getTime())) return "Invalid date";
 
-function formatDateTime(value) {
-  const date = parseLocalDateTime(value);
-
-  if (!date) return "Not scheduled";
-
-  return new Intl.DateTimeFormat("en-IN", {
+  return date.toLocaleString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
-  }).format(date);
+  });
 }
 
-function isOverdue(value, now = Date.now()) {
-  const date = parseLocalDateTime(value);
-
-  return date ? date.getTime() < now : false;
-}
-
-function getTodayKey() {
-  const now = new Date();
-
-  return [
-    now.getFullYear(),
-    pad(now.getMonth() + 1),
-    pad(now.getDate()),
-  ].join("-");
-}
-
-function readCalls() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (item) =>
-            item &&
-            typeof item === "object" &&
-            typeof item.id === "string"
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function getOutcomeClass(outcome) {
-  return String(outcome || "")
+function getBadgeClass(value) {
+  return String(value || "other")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
 }
 
-function CallModal({ call, onClose, onSave }) {
-  const [form, setForm] = useState(() =>
-    call
-      ? {
-          ...EMPTY_FORM,
-          ...call,
-          duration: String(call.duration ?? ""),
-        }
-      : {
-          ...EMPTY_FORM,
-          callAt: toLocalInputValue(),
-        }
-  );
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+  });
 
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    const details = Array.isArray(result?.errors)
+      ? result.errors
+          .map((item) => item.message)
+          .filter(Boolean)
+          .join("; ")
+      : "";
+
+    throw new Error(
+      details ||
+        result?.message ||
+        `Request failed (${response.status})`
+    );
+  }
+
+  return result;
+}
+
+async function apiMutation(path, method, payload) {
+  const csrfResponse = await apiRequest("/auth/csrf");
+
+  if (!csrfResponse.csrfToken) {
+    throw new Error(
+      "CSRF token unavailable. Please log in again."
+    );
+  }
+
+  return apiRequest(path, {
+    method,
+    headers: {
+      "X-CSRF-Token": csrfResponse.csrfToken,
+    },
+    ...(payload !== undefined
+      ? { body: JSON.stringify(payload) }
+      : {}),
+  });
+}
+
+async function getAllRecords(path, key, signal) {
+  const records = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const result = await apiRequest(
+      `${path}${path.includes("?") ? "&" : "?"}page=${page}&limit=100`,
+      { signal }
+    );
+
+    if (!Array.isArray(result[key])) {
+      throw new Error(`Invalid ${key} API response.`);
+    }
+
+    records.push(...result[key]);
+
+    totalPages = result.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return records;
+}
+
+function CallModal({
+  call,
+  contacts,
+  onClose,
+  onSave,
+}) {
+  const [form, setForm] = useState(() => {
+    if (!call) {
+      return {
+        ...EMPTY_FORM,
+        calledAt: toLocalInputValue(),
+      };
+    }
+
+    return {
+      contactType: call.contactType || "Lead",
+      referenceId: getId(
+        call.contactType === "Client"
+          ? call.client
+          : call.lead
+      ),
+      direction: call.direction || "Outgoing",
+      status: call.status || "Completed",
+      outcome: call.outcome || "Other",
+      durationSeconds: String(call.durationSeconds ?? 0),
+      calledAt: toLocalInputValue(call.calledAt),
+      nextFollowUp: toLocalInputValue(call.nextFollowUp),
+      notes: call.notes || "",
+    };
+  });
+
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") onClose();
-    };
+  const availableContacts =
+    contacts[form.contactType] || [];
 
-    document.addEventListener("keydown", onKeyDown);
-
-    return () =>
-      document.removeEventListener(
-        "keydown",
-        onKeyDown
-      );
-  }, [onClose]);
+  const selectedContact = availableContacts.find(
+    (contact) => getId(contact) === form.referenceId
+  );
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -167,100 +230,146 @@ function CallModal({ call, onClose, onSave }) {
     setForm((previous) => ({
       ...previous,
       [name]: value,
+      ...(name === "contactType"
+        ? { referenceId: "" }
+        : {}),
+      ...(name === "status" && value !== "Completed"
+        ? {
+            durationSeconds: "0",
+            outcome: "No Response",
+          }
+        : {}),
     }));
 
     setError("");
   };
 
-  const handleSubmit = (event) => {
+  useEffect(() => {
+    const handleEscape = (event) => {
+      if (event.key === "Escape" && !saving) {
+        onClose();
+      }
+    };
+
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [onClose, saving]);
+
+  const handleSubmit = async (event) => {
     event.preventDefault();
 
-    const contactName = form.contactName.trim();
-    const phone = form.phone.trim();
-    const employee = form.employee.trim();
+    if (saving) return;
 
-    if (!contactName || !employee) {
-      setError(
-        "Contact name and assigned employee are required."
-      );
+    if (!selectedContact) {
+      setError("Please select a valid Lead or Client.");
       return;
     }
 
-    if (!/^[6-9]\d{9}$/.test(phone)) {
-      setError(
-        "Enter a valid 10-digit Indian mobile number."
-      );
-      return;
-    }
-
-    const callDate = parseLocalDateTime(form.callAt);
-
-    if (!callDate) {
-      setError("Enter a valid call date and time.");
-      return;
-    }
-
-    if (callDate.getTime() > Date.now()) {
-      setError(
-        "Call date cannot be in the future."
-      );
-      return;
-    }
-
-    const duration = Number(form.duration || 0);
+    const durationSeconds = Number(form.durationSeconds);
 
     if (
-      !Number.isInteger(duration) ||
-      duration < 0 ||
-      duration > 1440
+      !Number.isInteger(durationSeconds) ||
+      durationSeconds < 0 ||
+      durationSeconds > 86400
     ) {
       setError(
-        "Call duration must be between 0 and 1440 minutes."
+        "Duration must be between 0 and 86400 seconds."
       );
       return;
     }
 
-    if (form.nextCallback) {
-      const callbackDate = parseLocalDateTime(
-        form.nextCallback
+    if (
+      form.status !== "Completed" &&
+      durationSeconds !== 0
+    ) {
+      setError(
+        "Only completed calls can have a duration."
       );
-
-      if (!callbackDate) {
-        setError("Enter a valid callback date.");
-        return;
-      }
-
-      if (
-        callbackDate.getTime() <=
-        callDate.getTime()
-      ) {
-        setError(
-          "Callback must be after the call date."
-        );
-        return;
-      }
+      return;
     }
 
-    onSave({
-      contactName,
-      business: form.business.trim(),
-      phone,
-      referenceType: form.referenceType,
-      referenceName: form.referenceName.trim(),
-      employee,
+    if (
+      form.status !== "Completed" &&
+      !["Other", "No Response"].includes(form.outcome)
+    ) {
+      setError(
+        "Selected outcome requires a completed call."
+      );
+      return;
+    }
+
+    const calledAt = new Date(form.calledAt);
+
+    if (Number.isNaN(calledAt.getTime())) {
+      setError("Please enter a valid call date.");
+      return;
+    }
+
+    const nextFollowUp = form.nextFollowUp
+      ? new Date(form.nextFollowUp)
+      : null;
+
+    if (
+      nextFollowUp &&
+      (
+        Number.isNaN(nextFollowUp.getTime()) ||
+        nextFollowUp <= calledAt
+      )
+    ) {
+      setError(
+        "Next follow-up must be after the call date."
+      );
+      return;
+    }
+
+    const payload = {
+      contactType: form.contactType,
+      lead:
+        form.contactType === "Lead"
+          ? form.referenceId
+          : null,
+      client:
+        form.contactType === "Client"
+          ? form.referenceId
+          : null,
+      contactName: selectedContact.name,
+      phone: selectedContact.phone,
+      direction: form.direction,
+      status: form.status,
       outcome: form.outcome,
-      callAt: form.callAt,
-      duration,
-      nextCallback: form.nextCallback,
+      durationSeconds,
+      calledAt: calledAt.toISOString(),
+      nextFollowUp: nextFollowUp
+        ? nextFollowUp.toISOString()
+        : null,
       notes: form.notes.trim(),
-    });
+    };
+
+    try {
+      setSaving(true);
+      setError("");
+
+      await onSave(payload);
+    } catch (err) {
+      setError(
+        err.message || "Unable to save call record."
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div
       className="calling__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (
+          event.target === event.currentTarget &&
+          !saving
+        ) {
           onClose();
         }
       }}
@@ -276,7 +385,6 @@ function CallModal({ call, onClose, onSave }) {
             <h2 id="calling-modal-title">
               {call ? "Edit Call Record" : "Log New Call"}
             </h2>
-
             <p>
               Record conversations and schedule callbacks.
             </p>
@@ -286,7 +394,8 @@ function CallModal({ call, onClose, onSave }) {
             type="button"
             className="calling__icon-button"
             onClick={onClose}
-            aria-label="Close form"
+            disabled={saving}
+            aria-label="Close"
           >
             <X size={19} />
           </button>
@@ -298,78 +407,84 @@ function CallModal({ call, onClose, onSave }) {
         >
           <div className="calling__form-grid">
             <label>
-              Contact Name *
-              <input
-                name="contactName"
-                value={form.contactName}
-                onChange={handleChange}
-                placeholder="Contact person"
-                maxLength={100}
-                required
-              />
-            </label>
-
-            <label>
-              Business / Company
-              <input
-                name="business"
-                value={form.business}
-                onChange={handleChange}
-                placeholder="Company name"
-                maxLength={120}
-              />
-            </label>
-
-            <label>
-              Phone Number *
-              <input
-                name="phone"
-                type="tel"
-                inputMode="numeric"
-                value={form.phone}
-                onChange={handleChange}
-                placeholder="9876543210"
-                maxLength={10}
-                required
-              />
-            </label>
-
-            <label>
-              Calling Employee *
-              <input
-                name="employee"
-                value={form.employee}
-                onChange={handleChange}
-                placeholder="Employee name"
-                maxLength={100}
-                required
-              />
-            </label>
-
-            <label>
-              Reference Type
+              Reference Type *
               <select
-                name="referenceType"
-                value={form.referenceType}
+                name="contactType"
+                value={form.contactType}
                 onChange={handleChange}
+                required
               >
-                {REFERENCES.map((type) => (
-                  <option key={type} value={type}>
-                    {type}
+                <option value="Lead">Lead</option>
+                {contacts.Client.length > 0 && (
+                  <option value="Client">Client</option>
+                )}
+              </select>
+            </label>
+
+            <label>
+              Select Contact *
+              <select
+                name="referenceId"
+                value={form.referenceId}
+                onChange={handleChange}
+                required
+              >
+                <option value="">Select contact</option>
+                {availableContacts.map((contact) => (
+                  <option
+                    key={getId(contact)}
+                    value={getId(contact)}
+                  >
+                    {contact.name}
+                    {contact.company
+                      ? ` — ${contact.company}`
+                      : ""}
                   </option>
                 ))}
               </select>
             </label>
 
             <label>
-              Lead / Client Reference
+              Contact Name
               <input
-                name="referenceName"
-                value={form.referenceName}
-                onChange={handleChange}
-                placeholder="Related lead or client"
-                maxLength={120}
+                value={selectedContact?.name || ""}
+                readOnly
               />
+            </label>
+
+            <label>
+              Phone Number
+              <input
+                value={selectedContact?.phone || ""}
+                readOnly
+              />
+            </label>
+
+            <label>
+              Call Direction
+              <select
+                name="direction"
+                value={form.direction}
+                onChange={handleChange}
+              >
+                <option value="Outgoing">Outgoing</option>
+                <option value="Incoming">Incoming</option>
+              </select>
+            </label>
+
+            <label>
+              Call Status
+              <select
+                name="status"
+                value={form.status}
+                onChange={handleChange}
+              >
+                {STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label>
@@ -379,11 +494,11 @@ function CallModal({ call, onClose, onSave }) {
                 value={form.outcome}
                 onChange={handleChange}
               >
-                {OUTCOMES.map((outcome) => (
-                  <option
-                    key={outcome}
-                    value={outcome}
-                  >
+                {(form.status === "Completed"
+                  ? OUTCOMES
+                  : ["No Response", "Other"]
+                ).map((outcome) => (
+                  <option key={outcome} value={outcome}>
                     {outcome}
                   </option>
                 ))}
@@ -391,25 +506,25 @@ function CallModal({ call, onClose, onSave }) {
             </label>
 
             <label>
-              Duration (minutes)
+              Duration (Seconds)
               <input
-                name="duration"
                 type="number"
+                name="durationSeconds"
                 min="0"
-                max="1440"
+                max="86400"
                 step="1"
-                value={form.duration}
+                value={form.durationSeconds}
                 onChange={handleChange}
-                placeholder="5"
+                disabled={form.status !== "Completed"}
               />
             </label>
 
             <label>
               Call Date & Time *
               <input
-                name="callAt"
                 type="datetime-local"
-                value={form.callAt}
+                name="calledAt"
+                value={form.calledAt}
                 onChange={handleChange}
                 required
               />
@@ -418,9 +533,9 @@ function CallModal({ call, onClose, onSave }) {
             <label>
               Next Callback
               <input
-                name="nextCallback"
                 type="datetime-local"
-                value={form.nextCallback}
+                name="nextFollowUp"
+                value={form.nextFollowUp}
                 onChange={handleChange}
               />
             </label>
@@ -431,9 +546,9 @@ function CallModal({ call, onClose, onSave }) {
                 name="notes"
                 value={form.notes}
                 onChange={handleChange}
-                placeholder="Discussion summary, client requirements, next action..."
-                maxLength={3000}
                 rows={4}
+                maxLength={5000}
+                placeholder="Discussion summary and next action..."
               />
             </label>
           </div>
@@ -452,6 +567,7 @@ function CallModal({ call, onClose, onSave }) {
               type="button"
               className="calling__button calling__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -459,8 +575,13 @@ function CallModal({ call, onClose, onSave }) {
             <button
               type="submit"
               className="calling__button calling__button--primary"
+              disabled={saving}
             >
-              {call ? "Save Changes" : "Save Call"}
+              {saving
+                ? "Saving..."
+                : call
+                  ? "Save Changes"
+                  : "Save Call"}
             </button>
           </div>
         </form>
@@ -470,102 +591,112 @@ function CallModal({ call, onClose, onSave }) {
 }
 
 export default function Calling() {
-  const [calls, setCalls] = useState(readCalls);
+  const [calls, setCalls] = useState([]);
+  const [contacts, setContacts] = useState({
+    Lead: [],
+    Client: [],
+  });
+
+  const [role, setRole] = useState("employee");
+  const [currentUserId, setCurrentUserId] = useState("");
+
   const [search, setSearch] = useState("");
-  const [outcomeFilter, setOutcomeFilter] =
-    useState("All");
-  const [employeeFilter, setEmployeeFilter] =
-    useState("All");
+  const [outcomeFilter, setOutcomeFilter] = useState("All");
+  const [employeeFilter, setEmployeeFilter] = useState("All");
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingCall, setEditingCall] = useState(null);
-  const [storageError, setStorageError] =
-    useState("");
-  const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(calls)
-      );
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [revision, setRevision] = useState(0);
 
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save call records in browser storage."
-      );
-    }
-  }, [calls]);
-
-  useEffect(() => {
-    const refreshTime = () => {
-      setNow(Date.now());
-    };
-
-    const interval = window.setInterval(
-      refreshTime,
-      60_000
-    );
-
-    window.addEventListener("focus", refreshTime);
-
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener(
-        "focus",
-        refreshTime
-      );
-    };
+  const refresh = useCallback(() => {
+    setRevision((value) => value + 1);
   }, []);
 
-  const employees = useMemo(
-    () =>
-      [...new Set(
+  const closeModal = useCallback(() => {
+    setModalOpen(false);
+    setEditingCall(null);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const [records, session] = await Promise.all([
+          getAllRecords("/calls", "calls"),
+          apiRequest("/auth/me"),
+        ]);
+
+        if (!active) return;
+
+        setCalls(records);
+        setRole(session.user?.role || "employee");
+        setCurrentUserId(getId(session.user));
+      } catch (err) {
+        if (active) {
+          setError(
+            err.message || "Unable to load call records."
+          );
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
+    };
+  }, [revision]);
+
+  const isManager = ["admin", "manager"].includes(role);
+
+  const employees = useMemo(() => {
+    return [
+      ...new Set(
         calls
-          .map((call) => call.employee)
+          .map((call) => call.calledBy?.name)
           .filter(Boolean)
-      )].sort((a, b) => a.localeCompare(b)),
-    [calls]
-  );
+      ),
+    ].sort();
+  }, [calls]);
 
   const stats = useMemo(() => {
-    const today = getTodayKey();
+    const today = new Date().toDateString();
+    const now = Date.now();
 
     return {
       total: calls.length,
-
       today: calls.filter(
         (call) =>
-          typeof call.callAt === "string" &&
-          call.callAt.slice(0, 10) === today
+          new Date(call.calledAt).toDateString() === today
       ).length,
-
-      connected: calls.filter((call) =>
-        ["Connected", "Interested"].includes(
-          call.outcome
-        )
+      connected: calls.filter(
+        (call) => call.status === "Completed"
       ).length,
-
       missed: calls.filter((call) =>
-        ["No Answer", "Busy"].includes(
-          call.outcome
-        )
+        ["No Answer", "Busy"].includes(call.status)
       ).length,
-
       callbacks: calls.filter(
         (call) =>
-          call.nextCallback &&
-          parseLocalDateTime(call.nextCallback)
-            ?.getTime() >= now
+          call.nextFollowUp &&
+          new Date(call.nextFollowUp).getTime() >= now
       ).length,
-
       overdue: calls.filter(
         (call) =>
-          call.nextCallback &&
-          isOverdue(call.nextCallback, now)
+          call.nextFollowUp &&
+          new Date(call.nextFollowUp).getTime() < now
       ).length,
     };
-  }, [calls, now]);
+  }, [calls]);
 
   const filteredCalls = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -574,14 +705,13 @@ export default function Calling() {
       .filter((call) => {
         const matchesSearch = [
           call.contactName,
-          call.business,
           call.phone,
-          call.employee,
-          call.referenceName,
-          call.referenceType,
+          call.calledBy?.name,
+          call.lead?.company,
+          call.client?.company,
           call.notes,
         ].some((value) =>
-          String(value ?? "")
+          String(value || "")
             .toLowerCase()
             .includes(query)
         );
@@ -592,7 +722,7 @@ export default function Calling() {
 
         const matchesEmployee =
           employeeFilter === "All" ||
-          call.employee === employeeFilter;
+          call.calledBy?.name === employeeFilter;
 
         return (
           matchesSearch &&
@@ -602,163 +732,187 @@ export default function Calling() {
       })
       .sort(
         (a, b) =>
-          (parseLocalDateTime(b.callAt)?.getTime() ||
-            0) -
-          (parseLocalDateTime(a.callAt)?.getTime() ||
-            0)
+          new Date(b.calledAt).getTime() -
+          new Date(a.calledAt).getTime()
       );
-  }, [
-    calls,
-    search,
-    outcomeFilter,
-    employeeFilter,
-  ]);
+  }, [calls, search, outcomeFilter, employeeFilter]);
 
-  const openAdd = () => {
-    setEditingCall(null);
-    setModalOpen(true);
-  };
+  const openModal = async (call = null) => {
+    if (busy) return;
 
-  const openEdit = (call) => {
-    setEditingCall(call);
-    setModalOpen(true);
-  };
+    try {
+      setBusy(true);
+      setError("");
 
-  const closeModal = () => {
-    setModalOpen(false);
-    setEditingCall(null);
-  };
+      const leads = await getAllRecords(
+        "/leads",
+        "leads"
+      );
 
-  const saveCall = (form) => {
-    const timestamp = new Date().toISOString();
+      const clients = isManager
+        ? await getAllRecords("/clients", "clients")
+        : [];
 
-    if (editingCall) {
-      setCalls((previous) =>
-        previous.map((call) =>
-          call.id === editingCall.id
-            ? {
-                ...call,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : call
+      const selectedLead = call?.lead;
+      const selectedClient = call?.client;
+
+      if (
+        selectedLead &&
+        typeof selectedLead === "object" &&
+        !leads.some(
+          (lead) => getId(lead) === getId(selectedLead)
         )
+      ) {
+        leads.unshift(selectedLead);
+      }
+
+      if (
+        selectedClient &&
+        typeof selectedClient === "object" &&
+        !clients.some(
+          (client) =>
+            getId(client) === getId(selectedClient)
+        )
+      ) {
+        clients.unshift(selectedClient);
+      }
+
+      setContacts({
+        Lead: leads,
+        Client: clients,
+      });
+
+      setEditingCall(call);
+      setModalOpen(true);
+    } catch (err) {
+      setError(
+        err.message || "Unable to open call form."
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveCall = async (payload) => {
+    if (editingCall) {
+      await apiMutation(
+        `/calls/${encodeURIComponent(getId(editingCall))}`,
+        "PATCH",
+        payload
       );
     } else {
-      setCalls((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+      await apiMutation(
+        "/calls",
+        "POST",
+        payload
+      );
     }
 
     closeModal();
+    refresh();
   };
 
-  const deleteCall = (call) => {
+  const deleteCall = async (call) => {
+    if (!isManager || busy) return;
+
     const confirmed = window.confirm(
       `Delete call record for "${call.contactName}"?`
     );
 
     if (!confirmed) return;
 
-    setCalls((previous) =>
-      previous.filter((item) => item.id !== call.id)
-    );
+    try {
+      setBusy(true);
+      setError("");
+
+      await apiMutation(
+        `/calls/${encodeURIComponent(getId(call))}`,
+        "DELETE"
+      );
+
+      refresh();
+    } catch (err) {
+      setError(
+        err.message || "Unable to delete call."
+      );
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const statCards = [
+  const cards = [
     {
       label: "Total Calls",
       value: stats.total,
-      icon: Phone,
+      Icon: Phone,
     },
     {
       label: "Calls Today",
       value: stats.today,
-      icon: PhoneCall,
+      Icon: PhoneCall,
     },
     {
       label: "Connected Calls",
       value: stats.connected,
-      icon: UsersRound,
+      Icon: UsersRound,
     },
     {
       label: "No Answer / Busy",
       value: stats.missed,
-      icon: PhoneMissed,
+      Icon: PhoneMissed,
     },
     {
       label: "Upcoming Callbacks",
       value: stats.callbacks,
-      icon: CalendarClock,
+      Icon: CalendarClock,
     },
     {
       label: "Overdue Callbacks",
       value: stats.overdue,
-      icon: Clock3,
+      Icon: Clock3,
     },
   ];
 
   return (
     <div className="calling">
-      {/* PAGE HEADER */}
-
       <div className="calling__header">
         <div>
           <span className="calling__eyebrow">
             SALES OPERATIONS
           </span>
-
           <h1>Calling Management</h1>
-
           <p>
-            Track employee calls, conversation
-            outcomes and upcoming callbacks.
+            Track employee calls, conversation outcomes
+            and upcoming callbacks.
           </p>
         </div>
 
         <button
           type="button"
           className="calling__button calling__button--primary"
-          onClick={openAdd}
+          onClick={() => void openModal()}
+          disabled={busy}
         >
           <Plus size={18} />
           Log New Call
         </button>
       </div>
 
-      {storageError && (
-        <div
-          className="calling__error"
-          role="alert"
-        >
-          {storageError}
+      {error && (
+        <div className="calling__error" role="alert">
+          {error}
         </div>
       )}
 
-      {/* STATISTICS */}
-
       <div className="calling__stats">
-        {statCards.map(
-          ({ label, value, icon: Icon }) => (
-            <div
-              className="calling__stat"
-              key={label}
-            >
-              <Icon size={21} />
-              <span>{label}</span>
-              <strong>{value}</strong>
-            </div>
-          )
-        )}
+        {cards.map(({ label, value, Icon }) => (
+          <div className="calling__stat" key={label}>
+            <Icon size={21} />
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
       </div>
-
-      {/* CALL HISTORY */}
 
       <section className="calling__panel">
         <div className="calling__panel-heading">
@@ -767,17 +921,13 @@ export default function Calling() {
               <History size={19} />
               Call History
             </h2>
-
-            <p>
-              All recorded client and lead calls
-            </p>
+            <p>All recorded client and lead calls</p>
           </div>
         </div>
 
         <div className="calling__toolbar">
           <div className="calling__search">
             <Search size={18} />
-
             <input
               type="search"
               value={search}
@@ -785,7 +935,7 @@ export default function Calling() {
                 setSearch(event.target.value)
               }
               placeholder="Search contact, phone, employee..."
-              aria-label="Search call records"
+              aria-label="Search calls"
             />
           </div>
 
@@ -797,12 +947,8 @@ export default function Calling() {
               onChange={(event) =>
                 setEmployeeFilter(event.target.value)
               }
-              aria-label="Filter by employee"
             >
-              <option value="All">
-                All Employees
-              </option>
-
+              <option value="All">All Employees</option>
               {employees.map((employee) => (
                 <option
                   key={employee}
@@ -818,12 +964,8 @@ export default function Calling() {
               onChange={(event) =>
                 setOutcomeFilter(event.target.value)
               }
-              aria-label="Filter by call outcome"
             >
-              <option value="All">
-                All Outcomes
-              </option>
-
+              <option value="All">All Outcomes</option>
               {OUTCOMES.map((outcome) => (
                 <option
                   key={outcome}
@@ -853,12 +995,22 @@ export default function Calling() {
 
             <tbody>
               {filteredCalls.map((call) => {
+                const reference =
+                  call.contactType === "Lead"
+                    ? call.lead
+                    : call.client;
+
                 const overdue =
-                  call.nextCallback &&
-                  isOverdue(call.nextCallback, now);
+                  call.nextFollowUp &&
+                  new Date(call.nextFollowUp).getTime() <
+                    Date.now();
+
+                const canEdit =
+                  isManager ||
+                  getId(call.calledBy) === currentUserId;
 
                 return (
-                  <tr key={call.id}>
+                  <tr key={getId(call)}>
                     <td>
                       <div className="calling__identity">
                         <span className="calling__avatar">
@@ -872,17 +1024,15 @@ export default function Calling() {
                             {call.contactName}
                           </strong>
 
-                          <a
-                            href={`tel:${call.phone}`}
-                          >
+                          <a href={`tel:${call.phone}`}>
                             <Phone size={12} />
                             {call.phone}
                           </a>
 
-                          {call.business && (
+                          {reference?.company && (
                             <small>
                               <Building2 size={12} />
-                              {call.business}
+                              {reference.company}
                             </small>
                           )}
                         </div>
@@ -891,13 +1041,9 @@ export default function Calling() {
 
                     <td>
                       <div className="calling__reference">
-                        <span>
-                          {call.referenceType}
-                        </span>
-
+                        <span>{call.contactType}</span>
                         <strong>
-                          {call.referenceName ||
-                            "Not linked"}
+                          {reference?.name || "Not linked"}
                         </strong>
                       </div>
                     </td>
@@ -905,24 +1051,27 @@ export default function Calling() {
                     <td>
                       <span className="calling__employee">
                         <UserRound size={14} />
-                        {call.employee}
+                        {call.calledBy?.name || "Unknown"}
                       </span>
                     </td>
 
                     <td>
                       <span className="calling__date">
                         <Clock3 size={14} />
-                        {formatDateTime(call.callAt)}
+                        {formatDate(call.calledAt)}
                       </span>
                     </td>
 
                     <td>
-                      {Number(call.duration) || 0} min
+                      {Math.floor(
+                        (call.durationSeconds || 0) / 60
+                      )}{" "}
+                      min
                     </td>
 
                     <td>
                       <span
-                        className={`calling__badge calling__badge--${getOutcomeClass(
+                        className={`calling__badge calling__badge--${getBadgeClass(
                           call.outcome
                         )}`}
                       >
@@ -931,7 +1080,7 @@ export default function Calling() {
                     </td>
 
                     <td>
-                      {call.nextCallback ? (
+                      {call.nextFollowUp ? (
                         <span
                           className={`calling__callback ${
                             overdue
@@ -940,14 +1089,8 @@ export default function Calling() {
                           }`}
                         >
                           <CalendarClock size={14} />
-
-                          {formatDateTime(
-                            call.nextCallback
-                          )}
-
-                          {overdue && (
-                            <small>Overdue</small>
-                          )}
+                          {formatDate(call.nextFollowUp)}
+                          {overdue && <small>Overdue</small>}
                         </span>
                       ) : (
                         <span className="calling__muted">
@@ -958,28 +1101,34 @@ export default function Calling() {
 
                     <td>
                       <div className="calling__actions">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            openEdit(call)
-                          }
-                          title="Edit call"
-                          aria-label={`Edit call for ${call.contactName}`}
-                        >
-                          <Pencil size={16} />
-                        </button>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void openModal(call)
+                            }
+                            disabled={busy}
+                            title="Edit call"
+                            aria-label={`Edit ${call.contactName}`}
+                          >
+                            <Pencil size={16} />
+                          </button>
+                        )}
 
-                        <button
-                          type="button"
-                          className="calling__delete"
-                          onClick={() =>
-                            deleteCall(call)
-                          }
-                          title="Delete call"
-                          aria-label={`Delete call for ${call.contactName}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        {isManager && (
+                          <button
+                            type="button"
+                            className="calling__delete"
+                            onClick={() =>
+                              void deleteCall(call)
+                            }
+                            disabled={busy}
+                            title="Delete call"
+                            aria-label={`Delete ${call.contactName}`}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
 
                         <a
                           href={`tel:${call.phone}`}
@@ -1000,24 +1149,34 @@ export default function Calling() {
                     <div className="calling__empty">
                       <PhoneCall size={36} />
 
-                      <h3>No call records found</h3>
+                      <h3>
+                        {loading
+                          ? "Loading calls..."
+                          : "No call records found"}
+                      </h3>
 
                       <p>
-                        {calls.length === 0
-                          ? "Log your first call to start tracking conversations."
-                          : "Try adjusting the search or filters."}
+                        {loading
+                          ? "Fetching records from backend."
+                          : calls.length === 0
+                            ? "Log your first call."
+                            : "Try changing the filters."}
                       </p>
 
-                      {calls.length === 0 && (
-                        <button
-                          type="button"
-                          className="calling__button calling__button--primary"
-                          onClick={openAdd}
-                        >
-                          <Plus size={16} />
-                          Log First Call
-                        </button>
-                      )}
+                      {!loading &&
+                        calls.length === 0 && (
+                          <button
+                            type="button"
+                            className="calling__button calling__button--primary"
+                            onClick={() =>
+                              void openModal()
+                            }
+                            disabled={busy}
+                          >
+                            <Plus size={16} />
+                            Log First Call
+                          </button>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -1035,6 +1194,7 @@ export default function Calling() {
       {modalOpen && (
         <CallModal
           call={editingCall}
+          contacts={contacts}
           onClose={closeModal}
           onSave={saveCall}
         />

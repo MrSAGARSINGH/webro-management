@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Search,
@@ -18,180 +18,262 @@ import {
   Building2,
   Clock3,
 } from "lucide-react";
-
 import "./FollowUps.scss";
 
-const STORAGE_KEY = "webro-management-followups-v1";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
+const TYPES = ["Call", "WhatsApp", "Email", "Meeting", "Demo", "Other"];
 const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
-const TYPES = ["Call", "WhatsApp", "Email", "Meeting", "Other"];
-const REFERENCES = ["Lead", "Client", "Other"];
+const STATUSES = ["Pending", "In Progress", "Completed", "Cancelled"];
 
 const EMPTY_FORM = {
   title: "",
-  contactName: "",
-  business: "",
-  phone: "",
-  referenceType: "Lead",
-  referenceName: "",
+  contactType: "Lead",
+  referenceId: "",
   assignedTo: "",
   type: "Call",
   priority: "Medium",
-  dueAt: "",
-  notes: "",
+  scheduledAt: "",
+  reminderAt: "",
+  description: "",
 };
 
-const pad = (value) => String(value).padStart(2, "0");
+const getId = (value) =>
+  typeof value === "string" ? value : value?._id || value?.id || "";
 
-function localDateTime(date = new Date()) {
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}T${pad(
-    date.getHours()
-  )}:${pad(date.getMinutes())}`;
-}
+const pad = (number) => String(number).padStart(2, "0");
 
-function parseDate(value) {
-  if (typeof value !== "string" || !value) return null;
-
+function localDateTime(value = new Date()) {
+  if (!value) return "";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (Number.isNaN(date.getTime())) return "";
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatDate(value) {
-  const date = parseDate(value);
-  if (!date) return "Not scheduled";
+  if (!value) return "Not scheduled";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Invalid date";
 
-  return new Intl.DateTimeFormat("en-IN", {
+  return date.toLocaleString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
-  }).format(date);
+  });
 }
 
-function dayKey(date) {
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || data?.success !== true) {
+    throw new Error(data?.message || `API error (${response.status})`);
+  }
+
+  return data;
+}
+
+async function apiMutation(path, method, payload) {
+  const csrf = await apiRequest("/auth/csrf");
+
+  if (!csrf.csrfToken) {
+    throw new Error("CSRF token unavailable. Please log in again.");
+  }
+
+  return apiRequest(path, {
+    method,
+    headers: { "X-CSRF-Token": csrf.csrfToken },
+    ...(payload !== undefined
+      ? { body: JSON.stringify(payload) }
+      : {}),
+  });
+}
+
+async function fetchAll(path, key) {
+  const records = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const separator = path.includes("?") ? "&" : "?";
+    const result = await apiRequest(
+      `${path}${separator}page=${page}&limit=100`
+    );
+
+    if (!Array.isArray(result[key])) {
+      throw new Error(`Invalid ${key} response from backend.`);
+    }
+
+    records.push(...result[key]);
+    totalPages = result.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return records;
 }
 
 function getBucket(item, now) {
   if (item.status === "Completed") return "Completed";
+  if (item.status === "Cancelled") return "Cancelled";
 
-  const due = parseDate(item.dueAt);
-  if (!due) return "Unscheduled";
+  const scheduled = new Date(item.scheduledAt);
+  if (Number.isNaN(scheduled.getTime())) return "Upcoming";
 
-  if (due.getTime() < now.getTime()) return "Overdue";
+  if (scheduled.getTime() < now.getTime()) return "Overdue";
 
-  if (dayKey(due) === dayKey(now)) return "Today";
+  if (scheduled.toDateString() === now.toDateString()) {
+    return "Today";
+  }
 
   return "Upcoming";
 }
 
-function readFollowUps() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-
-    const data = JSON.parse(raw);
-
-    return Array.isArray(data)
-      ? data.filter(
-          (item) =>
-            item &&
-            typeof item === "object" &&
-            typeof item.id === "string"
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function FollowUpModal({ item, onClose, onSave }) {
-  const [form, setForm] = useState(
+function FollowUpModal({
+  item,
+  contacts,
+  employees,
+  currentUserId,
+  canAssign,
+  onClose,
+  onSave,
+}) {
+  const [form, setForm] = useState(() =>
     item
-      ? { ...EMPTY_FORM, ...item }
-      : { ...EMPTY_FORM, dueAt: localDateTime() }
+      ? {
+          title: item.title || "",
+          contactType: item.contactType || "Lead",
+          referenceId: getId(
+            item.contactType === "Client" ? item.client : item.lead
+          ),
+          assignedTo: getId(item.assignedTo),
+          type: item.type || "Call",
+          priority: item.priority || "Medium",
+          scheduledAt: localDateTime(item.scheduledAt),
+          reminderAt: localDateTime(item.reminderAt),
+          description: item.description || "",
+        }
+      : {
+          ...EMPTY_FORM,
+          scheduledAt: localDateTime(),
+          assignedTo: currentUserId,
+        }
   );
 
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const options = contacts[form.contactType] || [];
+
+  const selectedContact = options.find(
+    (contact) => getId(contact) === form.referenceId
+  );
 
   useEffect(() => {
-    const handleEscape = (event) => {
-      if (event.key === "Escape") onClose();
+    const onEscape = (event) => {
+      if (event.key === "Escape" && !saving) onClose();
     };
 
-    document.addEventListener("keydown", handleEscape);
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [onClose, saving]);
 
-    return () =>
-      document.removeEventListener(
-        "keydown",
-        handleEscape
-      );
-  }, [onClose]);
-
-  function handleChange(event) {
+  const handleChange = (event) => {
     const { name, value } = event.target;
 
     setForm((previous) => ({
       ...previous,
       [name]: value,
+      ...(name === "contactType" ? { referenceId: "" } : {}),
     }));
 
     setError("");
-  }
+  };
 
-  function handleSubmit(event) {
+  const handleSubmit = async (event) => {
     event.preventDefault();
+    if (saving) return;
 
-    const title = form.title.trim();
-    const contactName = form.contactName.trim();
-    const assignedTo = form.assignedTo.trim();
-    const phone = form.phone.trim();
-
-    if (!title || !contactName || !assignedTo) {
-      setError(
-        "Title, contact name and assigned employee are required."
-      );
+    if (form.title.trim().length < 3) {
+      setError("Title must contain at least 3 characters.");
       return;
     }
 
-    if (phone && !/^[6-9]\d{9}$/.test(phone)) {
-      setError("Enter a valid 10-digit Indian mobile number.");
+    if (!selectedContact) {
+      setError("Select a valid Lead or Client.");
       return;
     }
 
-    if (!parseDate(form.dueAt)) {
-      setError("Select a valid follow-up date and time.");
+    if (!form.assignedTo) {
+      setError("Select an employee.");
       return;
     }
 
-    onSave({
-      title,
-      contactName,
-      business: form.business.trim(),
-      phone,
-      referenceType: form.referenceType,
-      referenceName: form.referenceName.trim(),
-      assignedTo,
+    const scheduled = new Date(form.scheduledAt);
+    const reminder = form.reminderAt
+      ? new Date(form.reminderAt)
+      : null;
+
+    if (Number.isNaN(scheduled.getTime())) {
+      setError("Enter a valid scheduled date.");
+      return;
+    }
+
+    if (
+      reminder &&
+      (Number.isNaN(reminder.getTime()) || reminder > scheduled)
+    ) {
+      setError("Reminder must be before or at the scheduled time.");
+      return;
+    }
+
+    const payload = {
+      contactType: form.contactType,
+      lead: form.contactType === "Lead" ? form.referenceId : null,
+      client: form.contactType === "Client" ? form.referenceId : null,
+      call: null,
+      title: form.title.trim(),
+      description: form.description.trim(),
       type: form.type,
       priority: form.priority,
-      dueAt: form.dueAt,
-      notes: form.notes.trim(),
-    });
-  }
+      scheduledAt: scheduled.toISOString(),
+      reminderAt: reminder ? reminder.toISOString() : null,
+      assignedTo: form.assignedTo,
+    };
+
+    try {
+      setSaving(true);
+      setError("");
+      await onSave(payload);
+    } catch (err) {
+      setError(err.message || "Unable to save follow-up.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div
       className="followups__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
+        if (event.target === event.currentTarget && !saving) onClose();
       }}
     >
       <section
@@ -212,16 +294,14 @@ function FollowUpModal({ item, onClose, onSave }) {
             type="button"
             className="followups__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close form"
           >
             <X size={20} />
           </button>
         </div>
 
-        <form
-          className="followups__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="followups__form" onSubmit={handleSubmit}>
           <div className="followups__form-grid">
             <label className="followups__form-full">
               Follow-up Title *
@@ -229,84 +309,52 @@ function FollowUpModal({ item, onClose, onSave }) {
                 name="title"
                 value={form.title}
                 onChange={handleChange}
-                placeholder="Discuss website proposal"
-                maxLength={150}
+                maxLength={200}
                 required
+                placeholder="Follow up on website proposal"
               />
             </label>
 
             <label>
-              Contact Name *
-              <input
-                name="contactName"
-                value={form.contactName}
-                onChange={handleChange}
-                placeholder="Client or lead name"
-                maxLength={100}
-                required
-              />
-            </label>
-
-            <label>
-              Business / Company
-              <input
-                name="business"
-                value={form.business}
-                onChange={handleChange}
-                placeholder="Business name"
-                maxLength={120}
-              />
-            </label>
-
-            <label>
-              Phone Number
-              <input
-                name="phone"
-                type="tel"
-                inputMode="numeric"
-                value={form.phone}
-                onChange={handleChange}
-                placeholder="9876543210"
-                maxLength={10}
-              />
-            </label>
-
-            <label>
-              Assigned Employee *
-              <input
-                name="assignedTo"
-                value={form.assignedTo}
-                onChange={handleChange}
-                placeholder="Employee name"
-                maxLength={100}
-                required
-              />
-            </label>
-
-            <label>
-              Reference Type
+              Contact Type *
               <select
-                name="referenceType"
-                value={form.referenceType}
+                name="contactType"
+                value={form.contactType}
                 onChange={handleChange}
               >
-                {REFERENCES.map((type) => (
-                  <option key={type} value={type}>
-                    {type}
+                <option value="Lead">Lead</option>
+                {contacts.Client.length > 0 && (
+                  <option value="Client">Client</option>
+                )}
+              </select>
+            </label>
+
+            <label>
+              Lead / Client *
+              <select
+                name="referenceId"
+                value={form.referenceId}
+                onChange={handleChange}
+                required
+              >
+                <option value="">Select contact</option>
+                {options.map((contact) => (
+                  <option key={getId(contact)} value={getId(contact)}>
+                    {contact.name}
+                    {contact.company ? ` — ${contact.company}` : ""}
                   </option>
                 ))}
               </select>
             </label>
 
             <label>
-              Lead / Client Reference
-              <input
-                name="referenceName"
-                value={form.referenceName}
-                onChange={handleChange}
-                placeholder="Related record"
-                maxLength={120}
-              />
+              Contact Name
+              <input value={selectedContact?.name || ""} readOnly />
+            </label>
+
+            <label>
+              Phone Number
+              <input value={selectedContact?.phone || ""} readOnly />
             </label>
 
             <label>
@@ -317,9 +365,7 @@ function FollowUpModal({ item, onClose, onSave }) {
                 onChange={handleChange}
               >
                 {TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {type}
-                  </option>
+                  <option key={type}>{type}</option>
                 ))}
               </select>
             </label>
@@ -332,42 +378,76 @@ function FollowUpModal({ item, onClose, onSave }) {
                 onChange={handleChange}
               >
                 {PRIORITIES.map((priority) => (
-                  <option key={priority} value={priority}>
-                    {priority}
-                  </option>
+                  <option key={priority}>{priority}</option>
                 ))}
               </select>
             </label>
 
-            <label className="followups__form-full">
-              Follow-up Date & Time *
+            <label>
+              Assigned Employee *
+              <select
+                name="assignedTo"
+                value={form.assignedTo}
+                onChange={handleChange}
+                disabled={!canAssign}
+                required
+              >
+                {!canAssign && currentUserId && (
+                  <option value={currentUserId}>Myself</option>
+                )}
+
+                {canAssign && (
+                  <>
+                    <option value="">Select employee</option>
+                    {employees.map((employee) => (
+                      <option
+                        key={getId(employee)}
+                        value={getId(employee)}
+                      >
+                        {employee.name}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+            </label>
+
+            <label>
+              Scheduled Date & Time *
               <input
-                name="dueAt"
                 type="datetime-local"
-                value={form.dueAt}
+                name="scheduledAt"
+                value={form.scheduledAt}
                 onChange={handleChange}
                 required
               />
             </label>
 
-            <label className="followups__form-full">
-              Notes
-              <textarea
-                name="notes"
-                value={form.notes}
+            <label>
+              Reminder Date & Time
+              <input
+                type="datetime-local"
+                name="reminderAt"
+                value={form.reminderAt}
                 onChange={handleChange}
-                placeholder="What needs to be discussed or completed?"
+              />
+            </label>
+
+            <label className="followups__form-full">
+              Description
+              <textarea
+                name="description"
+                value={form.description}
+                onChange={handleChange}
                 rows={4}
-                maxLength={3000}
+                maxLength={5000}
+                placeholder="Discussion details and next steps..."
               />
             </label>
           </div>
 
           {error && (
-            <p
-              className="followups__form-error"
-              role="alert"
-            >
+            <p className="followups__form-error" role="alert">
               {error}
             </p>
           )}
@@ -377,6 +457,7 @@ function FollowUpModal({ item, onClose, onSave }) {
               type="button"
               className="followups__button followups__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -384,8 +465,13 @@ function FollowUpModal({ item, onClose, onSave }) {
             <button
               type="submit"
               className="followups__button followups__button--primary"
+              disabled={saving}
             >
-              {item ? "Save Changes" : "Create Follow-up"}
+              {saving
+                ? "Saving..."
+                : item
+                  ? "Save Changes"
+                  : "Create Follow-up"}
             </button>
           </div>
         </form>
@@ -395,216 +481,242 @@ function FollowUpModal({ item, onClose, onSave }) {
 }
 
 export default function FollowUps() {
-  const [items, setItems] = useState(readFollowUps);
+  const [items, setItems] = useState([]);
+  const [contacts, setContacts] = useState({
+    Lead: [],
+    Client: [],
+  });
+  const [employees, setEmployees] = useState([]);
+  const [role, setRole] = useState("employee");
+  const [currentUserId, setCurrentUserId] = useState("");
+
   const [search, setSearch] = useState("");
-  const [activeTab, setActiveTab] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
   const [priorityFilter, setPriorityFilter] = useState("All");
-  const [employeeFilter, setEmployeeFilter] = useState("All");
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
-  const [storageError, setStorageError] = useState("");
-  const [now, setNow] = useState(() => new Date());
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [revision, setRevision] = useState(0);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(items)
-      );
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save follow-ups in browser storage."
-      );
-    }
-  }, [items]);
+  const isManager = ["admin", "manager"].includes(role);
 
-  useEffect(() => {
-    const refresh = () => setNow(new Date());
-    const interval = window.setInterval(refresh, 60_000);
-
-    window.addEventListener("focus", refresh);
-
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-    };
+  const refresh = useCallback(() => {
+    setRevision((previous) => previous + 1);
   }, []);
 
-  const stats = useMemo(() => {
-    const counts = {
-      All: items.length,
-      Today: 0,
-      Upcoming: 0,
-      Overdue: 0,
-      Completed: 0,
+  const closeModal = useCallback(() => {
+    setModalOpen(false);
+    setEditingItem(null);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const [followUps, session] = await Promise.all([
+          fetchAll("/follow-ups", "followUps"),
+          apiRequest("/auth/me"),
+        ]);
+
+        if (!active) return;
+
+        setItems(followUps);
+        setRole(session.user?.role || "employee");
+        setCurrentUserId(getId(session.user));
+      } catch (err) {
+        if (active) {
+          setError(err.message || "Unable to load follow-ups.");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void load();
+
+    return () => {
+      active = false;
     };
+  }, [revision]);
 
-    items.forEach((item) => {
-      const bucket = getBucket(item, now);
-      if (bucket in counts) counts[bucket] += 1;
-    });
+  const stats = useMemo(() => {
+    const now = new Date();
 
-    return counts;
-  }, [items, now]);
-
-  const employees = useMemo(
-    () =>
-      [...new Set(
-        items.map((item) => item.assignedTo).filter(Boolean)
-      )].sort((a, b) => a.localeCompare(b)),
-    [items]
-  );
+    return {
+      total: items.length,
+      today: items.filter((item) => getBucket(item, now) === "Today")
+        .length,
+      overdue: items.filter(
+        (item) => getBucket(item, now) === "Overdue"
+      ).length,
+      completed: items.filter(
+        (item) => item.status === "Completed"
+      ).length,
+      pending: items.filter((item) =>
+        ["Pending", "In Progress"].includes(item.status)
+      ).length,
+    };
+  }, [items]);
 
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    const priorityRank = {
-      Urgent: 0,
-      High: 1,
-      Medium: 2,
-      Low: 3,
-    };
+    return items.filter((item) => {
+      const contact =
+        item.contactType === "Lead" ? item.lead : item.client;
 
-    return items
-      .filter((item) => {
-        const bucket = getBucket(item, now);
+      const matchesSearch = [
+        item.title,
+        item.description,
+        contact?.name,
+        contact?.company,
+        contact?.phone,
+        item.assignedTo?.name,
+      ].some((value) =>
+        String(value || "").toLowerCase().includes(query)
+      );
 
-        const matchesSearch = [
-          item.title,
-          item.contactName,
-          item.business,
-          item.phone,
-          item.assignedTo,
-          item.referenceName,
-          item.notes,
-        ].some((value) =>
-          String(value ?? "").toLowerCase().includes(query)
-        );
+      return (
+        matchesSearch &&
+        (statusFilter === "All" || item.status === statusFilter) &&
+        (priorityFilter === "All" ||
+          item.priority === priorityFilter)
+      );
+    });
+  }, [items, search, statusFilter, priorityFilter]);
 
-        return (
-          matchesSearch &&
-          (activeTab === "All" || bucket === activeTab) &&
-          (priorityFilter === "All" ||
-            item.priority === priorityFilter) &&
-          (employeeFilter === "All" ||
-            item.assignedTo === employeeFilter)
-        );
-      })
-      .sort((a, b) => {
-        if (a.status === "Completed" && b.status !== "Completed") {
-          return 1;
-        }
+  const openModal = async (item = null) => {
+    if (busy) return;
 
-        if (b.status === "Completed" && a.status !== "Completed") {
-          return -1;
-        }
+    try {
+      setBusy(true);
+      setError("");
 
-        const dateDiff =
-          (parseDate(a.dueAt)?.getTime() ?? Infinity) -
-          (parseDate(b.dueAt)?.getTime() ?? Infinity);
+      const leads = await fetchAll("/leads", "leads");
+      const clients = isManager
+        ? await fetchAll("/clients", "clients")
+        : [];
 
-        if (dateDiff !== 0) return dateDiff;
+      const users = isManager
+        ? await fetchAll("/users", "users")
+        : [];
 
-        return (
-          (priorityRank[a.priority] ?? 4) -
-          (priorityRank[b.priority] ?? 4)
-        );
-      });
-  }, [
-    items,
-    now,
-    search,
-    activeTab,
-    priorityFilter,
-    employeeFilter,
-  ]);
+      const selectedLead = item?.lead;
+      const selectedClient = item?.client;
 
-  const openAdd = () => {
-    setEditingItem(null);
-    setModalOpen(true);
-  };
+      if (
+        selectedLead &&
+        typeof selectedLead === "object" &&
+        !leads.some((lead) => getId(lead) === getId(selectedLead))
+      ) {
+        leads.unshift(selectedLead);
+      }
 
-  const openEdit = (item) => {
-    setEditingItem(item);
-    setModalOpen(true);
-  };
-
-  const closeModal = () => {
-    setModalOpen(false);
-    setEditingItem(null);
-  };
-
-  const saveFollowUp = (form) => {
-    const timestamp = new Date().toISOString();
-
-    if (editingItem) {
-      setItems((previous) =>
-        previous.map((item) =>
-          item.id === editingItem.id
-            ? {
-                ...item,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : item
+      if (
+        selectedClient &&
+        typeof selectedClient === "object" &&
+        !clients.some(
+          (client) => getId(client) === getId(selectedClient)
         )
+      ) {
+        clients.unshift(selectedClient);
+      }
+
+      setContacts({ Lead: leads, Client: clients });
+      setEmployees(users.filter((user) => user.isActive));
+      setEditingItem(item);
+      setModalOpen(true);
+    } catch (err) {
+      setError(err.message || "Unable to open follow-up form.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveFollowUp = async (payload) => {
+    if (editingItem) {
+      await apiMutation(
+        `/follow-ups/${encodeURIComponent(getId(editingItem))}`,
+        "PATCH",
+        payload
       );
     } else {
-      setItems((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          status: "Pending",
-          completedAt: null,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+      await apiMutation("/follow-ups", "POST", payload);
     }
 
     closeModal();
+    refresh();
   };
 
-  const toggleComplete = (item) => {
-    const completed = item.status === "Completed";
-    const timestamp = new Date().toISOString();
+  const changeStatus = async (item, status) => {
+    if (busy) return;
 
-    setItems((previous) =>
-      previous.map((current) =>
-        current.id === item.id
-          ? {
-              ...current,
-              status: completed ? "Pending" : "Completed",
-              completedAt: completed ? null : timestamp,
-              updatedAt: timestamp,
-            }
-          : current
-      )
-    );
+    try {
+      setBusy(true);
+      setError("");
+
+      const payload =
+        status === "Completed"
+          ? { status, completionNotes: "" }
+          : status === "Cancelled"
+            ? { status, cancellationReason: "" }
+            : { status };
+
+      await apiMutation(
+        `/follow-ups/${encodeURIComponent(getId(item))}/status`,
+        "PATCH",
+        payload
+      );
+
+      refresh();
+    } catch (err) {
+      setError(err.message || "Unable to update status.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const deleteFollowUp = (item) => {
-    if (
-      !window.confirm(
-        `Delete follow-up "${item.title}"? This cannot be undone.`
-      )
-    ) {
+  const deleteFollowUp = async (item) => {
+    if (!isManager || busy) return;
+
+    if (!window.confirm(`Delete follow-up "${item.title}"?`)) {
       return;
     }
 
-    setItems((previous) =>
-      previous.filter((current) => current.id !== item.id)
-    );
+    try {
+      setBusy(true);
+      setError("");
+
+      await apiMutation(
+        `/follow-ups/${encodeURIComponent(getId(item))}`,
+        "DELETE"
+      );
+
+      refresh();
+    } catch (err) {
+      setError(err.message || "Unable to delete follow-up.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const statCards = [
-    { label: "All", icon: ListTodo },
-    { label: "Today", icon: CalendarDays },
-    { label: "Upcoming", icon: CalendarClock },
-    { label: "Overdue", icon: AlertTriangle },
-    { label: "Completed", icon: CheckCircle2 },
+    { label: "Total Follow-ups", value: stats.total, Icon: ListTodo },
+    { label: "Due Today", value: stats.today, Icon: CalendarDays },
+    { label: "Overdue", value: stats.overdue, Icon: AlertTriangle },
+    {
+      label: "Completed",
+      value: stats.completed,
+      Icon: CheckCircle2,
+    },
+    { label: "Pending", value: stats.pending, Icon: CalendarClock },
   ];
 
   return (
@@ -614,75 +726,49 @@ export default function FollowUps() {
           <span className="followups__eyebrow">
             SALES OPERATIONS
           </span>
-
-          <h1>Follow-up Management</h1>
-
+          <h1>Follow-ups Management</h1>
           <p>
-            Track scheduled conversations, overdue actions
-            and employee responsibilities.
+            Schedule callbacks, track pending actions and manage
+            follow-up progress.
           </p>
         </div>
 
         <button
           type="button"
           className="followups__button followups__button--primary"
-          onClick={openAdd}
+          onClick={() => void openModal()}
+          disabled={busy}
         >
           <Plus size={18} />
           Add Follow-up
         </button>
       </div>
 
-      {storageError && (
+      {error && (
         <div className="followups__error" role="alert">
-          {storageError}
+          {error}
         </div>
       )}
 
       <div className="followups__stats">
-        {statCards.map(({ label, icon: Icon }) => (
-          <button
-            key={label}
-            type="button"
-            className={`followups__stat ${
-              activeTab === label
-                ? "followups__stat--active"
-                : ""
-            }`}
-            onClick={() => setActiveTab(label)}
-            aria-pressed={activeTab === label}
-          >
+        {statCards.map(({ label, value, Icon }) => (
+          <div className="followups__stat" key={label}>
             <Icon size={21} />
-            <span>
-              {label === "All" ? "Total Follow-ups" : label}
-            </span>
-            <strong>{stats[label]}</strong>
-          </button>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
         ))}
       </div>
 
       <section className="followups__panel">
-        <div className="followups__panel-heading">
-          <div>
-            <h2>Follow-up Schedule</h2>
-            <p>
-              {activeTab === "All"
-                ? "All assigned follow-up activities"
-                : `${activeTab} follow-up activities`}
-            </p>
-          </div>
-        </div>
-
         <div className="followups__toolbar">
           <div className="followups__search">
             <Search size={18} />
             <input
               type="search"
               value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
-              placeholder="Search contact, task, employee..."
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search follow-ups, contacts..."
               aria-label="Search follow-ups"
             />
           </div>
@@ -691,17 +777,14 @@ export default function FollowUps() {
             <Filter size={17} />
 
             <select
-              value={employeeFilter}
+              value={statusFilter}
               onChange={(event) =>
-                setEmployeeFilter(event.target.value)
+                setStatusFilter(event.target.value)
               }
-              aria-label="Filter by employee"
             >
-              <option value="All">All Employees</option>
-              {employees.map((employee) => (
-                <option key={employee} value={employee}>
-                  {employee}
-                </option>
+              <option value="All">All Statuses</option>
+              {STATUSES.map((status) => (
+                <option key={status}>{status}</option>
               ))}
             </select>
 
@@ -710,13 +793,10 @@ export default function FollowUps() {
               onChange={(event) =>
                 setPriorityFilter(event.target.value)
               }
-              aria-label="Filter by priority"
             >
               <option value="All">All Priorities</option>
               {PRIORITIES.map((priority) => (
-                <option key={priority} value={priority}>
-                  {priority}
-                </option>
+                <option key={priority}>{priority}</option>
               ))}
             </select>
           </div>
@@ -728,10 +808,10 @@ export default function FollowUps() {
               <tr>
                 <th>Follow-up</th>
                 <th>Contact</th>
-                <th>Assigned To</th>
                 <th>Type</th>
+                <th>Assigned To</th>
+                <th>Scheduled At</th>
                 <th>Priority</th>
-                <th>Due Date</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -739,49 +819,60 @@ export default function FollowUps() {
 
             <tbody>
               {filteredItems.map((item) => {
-                const bucket = getBucket(item, now);
-                const completed = item.status === "Completed";
+                const contact =
+                  item.contactType === "Lead"
+                    ? item.lead
+                    : item.client;
+
+                const bucket = getBucket(item, new Date());
 
                 return (
-                  <tr key={item.id}>
+                  <tr key={getId(item)}>
                     <td>
-                      <div className="followups__task">
+                      <div className="followups__identity">
                         <strong>{item.title}</strong>
-                        <small>
-                          {item.referenceType}:{" "}
-                          {item.referenceName || "Not linked"}
-                        </small>
+                        <small>{item.description || "No notes"}</small>
                       </div>
                     </td>
 
                     <td>
                       <div className="followups__contact">
-                        <strong>{item.contactName}</strong>
-
-                        {item.business && (
-                          <small>
-                            <Building2 size={12} />
-                            {item.business}
-                          </small>
-                        )}
-
-                        {item.phone && (
-                          <a href={`tel:${item.phone}`}>
+                        <strong>
+                          {contact?.name || "Unknown contact"}
+                        </strong>
+                        <small>
+                          <Building2 size={12} />
+                          {contact?.company || item.contactType}
+                        </small>
+                        {contact?.phone && (
+                          <a href={`tel:${contact.phone}`}>
                             <Phone size={12} />
-                            {item.phone}
+                            {contact.phone}
                           </a>
                         )}
                       </div>
                     </td>
 
+                    <td>{item.type}</td>
+
                     <td>
                       <span className="followups__employee">
                         <UserRound size={14} />
-                        {item.assignedTo}
+                        {item.assignedTo?.name || "Unassigned"}
                       </span>
                     </td>
 
-                    <td>{item.type}</td>
+                    <td>
+                      <span className="followups__date">
+                        <Clock3 size={14} />
+                        {formatDate(item.scheduledAt)}
+                      </span>
+                      {bucket === "Overdue" && (
+                        <small className="followups__overdue">
+                          Overdue
+                        </small>
+                      )}
+                    </td>
 
                     <td>
                       <span
@@ -792,72 +883,55 @@ export default function FollowUps() {
                     </td>
 
                     <td>
-                      <span
-                        className={`followups__date ${
-                          bucket === "Overdue"
-                            ? "followups__date--overdue"
-                            : ""
-                        }`}
+                      <select
+                        value={item.status}
+                        disabled={busy}
+                        onChange={(event) =>
+                          void changeStatus(item, event.target.value)
+                        }
+                        aria-label={`Status for ${item.title}`}
                       >
-                        <Clock3 size={14} />
-                        {formatDate(item.dueAt)}
-                      </span>
-                    </td>
-
-                    <td>
-                      <span
-                        className={`followups__badge followups__badge--${bucket.toLowerCase()}`}
-                      >
-                        {bucket}
-                      </span>
+                        {STATUSES.map((status) => (
+                          <option key={status}>{status}</option>
+                        ))}
+                      </select>
                     </td>
 
                     <td>
                       <div className="followups__actions">
                         <button
                           type="button"
-                          className={
-                            completed
-                              ? "followups__reopen"
-                              : "followups__complete"
-                          }
-                          onClick={() => toggleComplete(item)}
-                          title={
-                            completed
-                              ? "Reopen follow-up"
-                              : "Mark completed"
-                          }
-                          aria-label={
-                            completed
-                              ? `Reopen ${item.title}`
-                              : `Complete ${item.title}`
-                          }
-                        >
-                          {completed ? (
-                            <RotateCcw size={16} />
-                          ) : (
-                            <CheckCircle2 size={16} />
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => openEdit(item)}
+                          onClick={() => void openModal(item)}
+                          disabled={busy}
                           title="Edit follow-up"
-                          aria-label={`Edit ${item.title}`}
                         >
                           <Pencil size={16} />
                         </button>
 
-                        <button
-                          type="button"
-                          className="followups__delete"
-                          onClick={() => deleteFollowUp(item)}
-                          title="Delete follow-up"
-                          aria-label={`Delete ${item.title}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        {isManager && (
+                          <button
+                            type="button"
+                            className="followups__delete"
+                            onClick={() => void deleteFollowUp(item)}
+                            disabled={busy}
+                            title="Delete follow-up"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+
+                        {item.status === "Completed" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void changeStatus(item, "Pending")
+                            }
+                            disabled={busy}
+                            title="Reopen follow-up"
+                          >
+                            <RotateCcw size={16} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -868,24 +942,17 @@ export default function FollowUps() {
                 <tr>
                   <td colSpan={8}>
                     <div className="followups__empty">
-                      <CalendarClock size={36} />
-                      <h3>No follow-ups found</h3>
+                      <ListTodo size={36} />
+                      <h3>
+                        {loading
+                          ? "Loading follow-ups..."
+                          : "No follow-ups found"}
+                      </h3>
                       <p>
-                        {items.length === 0
-                          ? "Create your first follow-up to get started."
-                          : "Try another status, employee or priority."}
+                        {loading
+                          ? "Fetching records from backend."
+                          : "Add a follow-up or adjust your filters."}
                       </p>
-
-                      {items.length === 0 && (
-                        <button
-                          type="button"
-                          className="followups__button followups__button--primary"
-                          onClick={openAdd}
-                        >
-                          <Plus size={16} />
-                          Add Follow-up
-                        </button>
-                      )}
                     </div>
                   </td>
                 </tr>
@@ -895,14 +962,17 @@ export default function FollowUps() {
         </div>
 
         <div className="followups__table-footer">
-          Showing {filteredItems.length} of {items.length}{" "}
-          follow-ups
+          Showing {filteredItems.length} of {items.length} follow-ups
         </div>
       </section>
 
       {modalOpen && (
         <FollowUpModal
           item={editingItem}
+          contacts={contacts}
+          employees={employees}
+          currentUserId={currentUserId}
+          canAssign={isManager}
           onClose={closeModal}
           onSave={saveFollowUp}
         />

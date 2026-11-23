@@ -1,131 +1,157 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Plus,
-  Search,
-  Filter,
-  ClipboardList,
-  ListTodo,
-  Clock3,
-  CheckCircle2,
-  AlertTriangle,
-  Pencil,
-  Trash2,
-  X,
-  CalendarDays,
-  UserRound,
-  FolderKanban,
-  Flag,
-  Eye,
+  Plus, Search, Filter, ClipboardList, ListTodo, Clock3,
+  CheckCircle2, AlertTriangle, Pencil, Trash2, X,
+  CalendarDays, UserRound, FolderKanban, Flag, Eye,
   RotateCcw,
 } from "lucide-react";
 import "./Tasks.scss";
 
-const STORAGE_KEY = "webro-management-tasks-v1";
-const EMPLOYEES_KEY = "webro-management-employees-v1";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
 const STATUSES = [
-  "To Do",
-  "In Progress",
-  "In Review",
-  "Completed",
-  "Cancelled",
+  "Todo", "In Progress", "In Review",
+  "Completed", "On Hold", "Cancelled",
 ];
 
 const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 
+const TYPES = [
+  "Frontend", "Backend", "UI/UX Design", "Database",
+  "Testing", "Deployment", "Bug Fix", "SEO",
+  "Content", "Maintenance", "Other",
+];
+
 const EMPTY_FORM = {
   title: "",
   description: "",
-  projectName: "",
+  project: "",
   assignedTo: "",
+  type: "Other",
   priority: "Medium",
-  status: "To Do",
+  status: "Todo",
   startDate: "",
   dueDate: "",
   progress: "0",
 };
 
-const pad = (value) => String(value).padStart(2, "0");
+const idOf = (value) =>
+  typeof value === "string" ? value : value?._id || value?.id || "";
 
-function todayKey() {
-  const date = new Date();
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
-}
+const dateKey = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+};
 
-function formatDate(value) {
+const formatDate = (value) => {
   if (!value) return "Not set";
-
-  const date = new Date(`${value}T12:00:00`);
-
+  const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Invalid date";
-
-  return new Intl.DateTimeFormat("en-IN", {
+  return date.toLocaleDateString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).format(date);
-}
+  });
+};
 
-function readTasks() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+const toISO = (value) =>
+  value ? new Date(`${value}T12:00:00`).toISOString() : null;
 
-    const parsed = JSON.parse(raw);
+const statusClass = (value) =>
+  String(value).toLowerCase().replace(/\s+/g, "-");
 
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (task) =>
-            task &&
-            typeof task.id === "string" &&
-            typeof task.title === "string"
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function readEmployees() {
-  try {
-    const raw = localStorage.getItem(EMPLOYEES_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (employee) =>
-            employee &&
-            typeof employee.id === "string" &&
-            typeof employee.name === "string" &&
-            employee.status !== "Inactive"
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
+const displayStatus = (value) =>
+  value === "Todo" ? "To Do" : value;
 
 function isOverdue(task, today) {
-  return (
-    Boolean(task.dueDate) &&
-    task.dueDate < today &&
-    task.status !== "Completed" &&
-    task.status !== "Cancelled"
+  return Boolean(
+    task.dueDate &&
+    dateKey(task.dueDate) < today &&
+    !["Completed", "Cancelled"].includes(task.status)
   );
 }
 
-function getStatusClass(status) {
-  return String(status)
-    .toLowerCase()
-    .replace(/\s+/g, "-");
+async function api(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+      ...(options.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...options.headers,
+    },
+  });
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    const details = Array.isArray(result?.errors)
+      ? result.errors.map((item) => item.message).filter(Boolean).join("; ")
+      : "";
+
+    throw new Error(
+      details || result?.message || `Request failed (${response.status})`
+    );
+  }
+
+  return result;
+}
+
+async function mutate(path, method, payload) {
+  const session = await api("/auth/csrf");
+
+  if (!session.csrfToken) {
+    throw new Error("CSRF token unavailable. Please sign in again.");
+  }
+
+  return api(path, {
+    method,
+    headers: { "X-CSRF-Token": session.csrfToken },
+    ...(payload !== undefined
+      ? { body: JSON.stringify(payload) }
+      : {}),
+  });
+}
+
+async function fetchAll(path, key) {
+  const records = [];
+  let page = 1;
+  let pages = 1;
+
+  do {
+    const separator = path.includes("?") ? "&" : "?";
+    const result = await api(
+      `${path}${separator}page=${page}&limit=100`
+    );
+
+    if (!Array.isArray(result[key])) {
+      throw new Error(`Invalid ${key} API response.`);
+    }
+
+    records.push(...result[key]);
+    pages = result.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= pages);
+
+  return records;
 }
 
 function TaskModal({
   task,
+  projects,
   employees,
+  isManager,
   onClose,
   onSave,
 }) {
@@ -133,62 +159,69 @@ function TaskModal({
     task
       ? {
           ...EMPTY_FORM,
-          ...task,
+          title: task.title || "",
+          description: task.description || "",
+          project: idOf(task.project),
+          assignedTo: idOf(task.assignedTo),
+          type: task.type || "Other",
+          priority: task.priority || "Medium",
+          status: task.status || "Todo",
+          startDate: dateKey(task.startDate),
+          dueDate: dateKey(task.dueDate),
           progress: String(task.progress ?? 0),
         }
       : {
           ...EMPTY_FORM,
-          startDate: todayKey(),
+          startDate: dateKey(new Date()),
         }
   );
 
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const onEscape = (event) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !saving) onClose();
     };
 
     document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [onClose, saving]);
 
-    return () =>
-      document.removeEventListener("keydown", onEscape);
-  }, [onClose]);
-
-  const handleChange = (event) => {
+  const change = (event) => {
     const { name, value } = event.target;
 
-    setForm((previous) => {
-      const next = {
-        ...previous,
-        [name]: value,
-      };
-
-      if (name === "status") {
-        if (value === "Completed") {
-          next.progress = "100";
-        } else if (
-          previous.status === "Completed" &&
-          Number(previous.progress) === 100
-        ) {
-          next.progress = "0";
-        }
-      }
-
-      return next;
-    });
+    setForm((previous) => ({
+      ...previous,
+      [name]: value,
+      ...(name === "status"
+        ? {
+            progress:
+              value === "Completed"
+                ? "100"
+                : previous.status === "Completed"
+                  ? "0"
+                  : previous.progress,
+          }
+        : {}),
+    }));
 
     setError("");
   };
 
-  const handleSubmit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
+    if (saving) return;
 
-    const title = form.title.trim();
     const progress = Number(form.progress);
 
-    if (!title) {
-      setError("Task title is required.");
+    if (form.title.trim().length < 3) {
+      setError("Task title must contain at least 3 characters.");
+      return;
+    }
+
+    if (!task && !form.project) {
+      setError("Select a project.");
       return;
     }
 
@@ -211,41 +244,50 @@ function TaskModal({
     }
 
     if (
-      form.status === "Completed" &&
-      progress !== 100
+      (form.status === "Completed" && progress !== 100) ||
+      (form.status !== "Completed" && progress === 100)
     ) {
-      setError("Completed tasks must have 100% progress.");
+      setError("Completed tasks must have exactly 100% progress.");
       return;
     }
 
-    if (
-      form.status !== "Completed" &&
-      progress === 100
-    ) {
-      setError(
-        "Set the status to Completed for 100% progress."
-      );
-      return;
-    }
-
-    onSave({
-      title,
+    const details = {
+      title: form.title.trim(),
       description: form.description.trim(),
-      projectName: form.projectName.trim(),
-      assignedTo: form.assignedTo.trim(),
+      type: form.type,
       priority: form.priority,
-      status: form.status,
-      startDate: form.startDate,
-      dueDate: form.dueDate,
-      progress,
-    });
+      startDate: toISO(form.startDate),
+      dueDate: toISO(form.dueDate),
+    };
+
+    try {
+      setSaving(true);
+      setError("");
+
+      await onSave({
+        details: task
+          ? details
+          : {
+              ...details,
+              project: form.project,
+              assignedTo: form.assignedTo || null,
+            },
+        status: form.status,
+        progress,
+        assignedTo: form.assignedTo || null,
+      });
+    } catch (err) {
+      setError(err.message || "Unable to save task.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div
       className="tasks__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (event.target === event.currentTarget && !saving) {
           onClose();
         }
       }}
@@ -261,35 +303,31 @@ function TaskModal({
             <h2 id="task-modal-title">
               {task ? "Edit Task" : "Create New Task"}
             </h2>
-            <p>
-              Configure task details, assignment and deadline.
-            </p>
+            <p>Configure task details, assignment and deadline.</p>
           </div>
 
           <button
             type="button"
             className="tasks__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close task form"
           >
             <X size={20} />
           </button>
         </div>
 
-        <form
-          className="tasks__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="tasks__form" onSubmit={submit}>
           <div className="tasks__form-grid">
             <label className="tasks__form-full">
               Task Title *
               <input
                 name="title"
                 value={form.title}
-                onChange={handleChange}
-                maxLength={150}
-                placeholder="Build client dashboard"
+                onChange={change}
+                maxLength={200}
                 required
+                placeholder="Build client dashboard"
               />
             </label>
 
@@ -298,22 +336,29 @@ function TaskModal({
               <textarea
                 name="description"
                 value={form.description}
-                onChange={handleChange}
-                maxLength={3000}
+                onChange={change}
+                maxLength={10000}
                 rows={3}
                 placeholder="Task requirements and deliverables..."
               />
             </label>
 
             <label>
-              Project Reference
-              <input
-                name="projectName"
-                value={form.projectName}
-                onChange={handleChange}
-                maxLength={150}
-                placeholder="Project name"
-              />
+              Project Reference *
+              <select
+                name="project"
+                value={form.project}
+                onChange={change}
+                disabled={Boolean(task)}
+                required
+              >
+                <option value="">Select project</option>
+                {projects.map((project) => (
+                  <option key={idOf(project)} value={idOf(project)}>
+                    {project.name || project.title}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label>
@@ -321,27 +366,23 @@ function TaskModal({
               <select
                 name="assignedTo"
                 value={form.assignedTo}
-                onChange={handleChange}
+                onChange={change}
+                disabled={!isManager}
               >
                 <option value="">Unassigned</option>
-
-                {form.assignedTo &&
-                  !employees.some(
-                    (employee) =>
-                      employee.name === form.assignedTo
-                  ) && (
-                    <option value={form.assignedTo}>
-                      {form.assignedTo} (Existing)
-                    </option>
-                  )}
-
                 {employees.map((employee) => (
-                  <option
-                    key={employee.id}
-                    value={employee.name}
-                  >
+                  <option key={idOf(employee)} value={idOf(employee)}>
                     {employee.name}
                   </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              Task Type
+              <select name="type" value={form.type} onChange={change}>
+                {TYPES.map((type) => (
+                  <option key={type}>{type}</option>
                 ))}
               </select>
             </label>
@@ -351,12 +392,10 @@ function TaskModal({
               <select
                 name="priority"
                 value={form.priority}
-                onChange={handleChange}
+                onChange={change}
               >
                 {PRIORITIES.map((priority) => (
-                  <option key={priority}>
-                    {priority}
-                  </option>
+                  <option key={priority}>{priority}</option>
                 ))}
               </select>
             </label>
@@ -366,11 +405,11 @@ function TaskModal({
               <select
                 name="status"
                 value={form.status}
-                onChange={handleChange}
+                onChange={change}
               >
                 {STATUSES.map((status) => (
-                  <option key={status}>
-                    {status}
+                  <option key={status} value={status}>
+                    {displayStatus(status)}
                   </option>
                 ))}
               </select>
@@ -382,7 +421,7 @@ function TaskModal({
                 type="date"
                 name="startDate"
                 value={form.startDate}
-                onChange={handleChange}
+                onChange={change}
               />
             </label>
 
@@ -392,22 +431,22 @@ function TaskModal({
                 type="date"
                 name="dueDate"
                 value={form.dueDate}
-                onChange={handleChange}
+                onChange={change}
               />
             </label>
 
             <label className="tasks__form-full">
               Progress — {form.progress}%
               <input
+                className="tasks__range"
                 type="range"
                 name="progress"
                 min="0"
                 max="100"
                 step="5"
                 value={form.progress}
-                onChange={handleChange}
+                onChange={change}
                 disabled={form.status === "Completed"}
-                className="tasks__range"
               />
             </label>
           </div>
@@ -423,6 +462,7 @@ function TaskModal({
               type="button"
               className="tasks__button tasks__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -430,8 +470,13 @@ function TaskModal({
             <button
               type="submit"
               className="tasks__button tasks__button--primary"
+              disabled={saving}
             >
-              {task ? "Save Changes" : "Create Task"}
+              {saving
+                ? "Saving..."
+                : task
+                  ? "Save Changes"
+                  : "Create Task"}
             </button>
           </div>
         </form>
@@ -440,14 +485,12 @@ function TaskModal({
   );
 }
 
-function TaskDetails({ task, onClose, onEdit }) {
+function TaskDetails({ task, onClose, onEdit, canEdit }) {
   return (
     <div
       className="tasks__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
+        if (event.target === event.currentTarget) onClose();
       }}
     >
       <section
@@ -458,12 +501,9 @@ function TaskDetails({ task, onClose, onEdit }) {
       >
         <div className="tasks__modal-header">
           <div>
-            <span className="tasks__eyebrow">
-              TASK DETAILS
-            </span>
+            <span className="tasks__eyebrow">TASK DETAILS</span>
             <h2 id="task-details-title">{task.title}</h2>
           </div>
-
           <button
             type="button"
             className="tasks__icon-button"
@@ -482,40 +522,27 @@ function TaskDetails({ task, onClose, onEdit }) {
           <div className="tasks__details-grid">
             <div>
               <span>Project</span>
-              <strong>
-                {task.projectName || "Not linked"}
-              </strong>
+              <strong>{task.project?.name || "Not linked"}</strong>
             </div>
-
             <div>
               <span>Assigned To</span>
-              <strong>
-                {task.assignedTo || "Unassigned"}
-              </strong>
+              <strong>{task.assignedTo?.name || "Unassigned"}</strong>
             </div>
-
             <div>
               <span>Priority</span>
               <strong>{task.priority}</strong>
             </div>
-
             <div>
               <span>Status</span>
-              <strong>{task.status}</strong>
+              <strong>{displayStatus(task.status)}</strong>
             </div>
-
             <div>
               <span>Start Date</span>
-              <strong>
-                {formatDate(task.startDate)}
-              </strong>
+              <strong>{formatDate(task.startDate)}</strong>
             </div>
-
             <div>
               <span>Due Date</span>
-              <strong>
-                {formatDate(task.dueDate)}
-              </strong>
+              <strong>{formatDate(task.dueDate)}</strong>
             </div>
           </div>
 
@@ -524,24 +551,21 @@ function TaskDetails({ task, onClose, onEdit }) {
               <span>Task Progress</span>
               <strong>{task.progress}%</strong>
             </div>
-
             <div className="tasks__progress-track">
-              <span
-                style={{
-                  width: `${task.progress}%`,
-                }}
-              />
+              <span style={{ width: `${task.progress}%` }} />
             </div>
           </div>
 
-          <button
-            type="button"
-            className="tasks__button tasks__button--primary"
-            onClick={onEdit}
-          >
-            <Pencil size={16} />
-            Edit Task
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              className="tasks__button tasks__button--primary"
+              onClick={onEdit}
+            >
+              <Pencil size={16} />
+              Edit Task
+            </button>
+          )}
         </div>
       </section>
     </div>
@@ -549,301 +573,336 @@ function TaskDetails({ task, onClose, onEdit }) {
 }
 
 export default function Tasks() {
-  const [tasks, setTasks] = useState(readTasks);
-  const [employees, setEmployees] =
-    useState(readEmployees);
+  const [tasks, setTasks] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [role, setRole] = useState("employee");
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] =
-    useState("All");
-  const [priorityFilter, setPriorityFilter] =
-    useState("All");
-  const [employeeFilter, setEmployeeFilter] =
-    useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [priorityFilter, setPriorityFilter] = useState("All");
+  const [employeeFilter, setEmployeeFilter] = useState("All");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
-  const [viewingTaskId, setViewingTaskId] =
-    useState(null);
-  const [storageError, setStorageError] =
-    useState("");
-  const [today, setToday] = useState(todayKey);
+  const [viewingTaskId, setViewingTaskId] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [revision, setRevision] = useState(0);
+
+  const isManager = ["admin", "manager"].includes(role);
+  const today = dateKey(new Date());
+
+  const refresh = useCallback(() => {
+    setRevision((value) => value + 1);
+  }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(tasks)
-      );
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save task records in browser storage."
-      );
+    let active = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const [records, session] = await Promise.all([
+          fetchAll("/tasks", "tasks"),
+          api("/auth/me"),
+        ]);
+
+        if (!active) return;
+
+        setTasks(records);
+        setRole(session.user?.role || "employee");
+      } catch (err) {
+        if (active) {
+          setError(err.message || "Unable to load tasks.");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
     }
-  }, [tasks]);
 
-  useEffect(() => {
-    const refresh = () => {
-      setToday(todayKey());
-      setEmployees(readEmployees());
-    };
-
-    const interval = window.setInterval(
-      refresh,
-      60_000
-    );
-
-    window.addEventListener("focus", refresh);
-    window.addEventListener("storage", refresh);
+    void load();
 
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("storage", refresh);
+      active = false;
     };
-  }, []);
+  }, [revision]);
+
+  const openForm = async (task = null) => {
+    if (busy) return;
+
+    try {
+      setBusy(true);
+      setError("");
+
+      const projectList = await fetchAll("/projects", "projects");
+      const userList = isManager
+        ? await fetchAll("/users", "users")
+        : [];
+
+      if (
+        task?.project &&
+        typeof task.project === "object" &&
+        !projectList.some(
+          (project) => idOf(project) === idOf(task.project)
+        )
+      ) {
+        projectList.unshift(task.project);
+      }
+
+      if (
+        task?.assignedTo &&
+        typeof task.assignedTo === "object" &&
+        !userList.some(
+          (user) => idOf(user) === idOf(task.assignedTo)
+        )
+      ) {
+        userList.unshift(task.assignedTo);
+      }
+
+      setProjects(projectList);
+      setEmployees(
+        userList.filter((user) => user.isActive !== false)
+      );
+      setEditingTask(task);
+      setModalOpen(true);
+    } catch (err) {
+      setError(err.message || "Unable to load form data.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveTask = async (payload) => {
+    if (!editingTask) {
+      const created = await mutate(
+        "/tasks",
+        "POST",
+        payload.details
+      );
+
+      const newTaskId = idOf(created.task);
+
+      if (
+        newTaskId &&
+        (payload.status !== "Todo" || payload.progress !== 0)
+      ) {
+        await mutate(
+          `/tasks/${newTaskId}/status`,
+          "PATCH",
+          {
+            status: payload.status,
+            progress: payload.progress,
+          }
+        );
+      }
+    } else {
+      const taskId = idOf(editingTask);
+
+      await mutate(
+        `/tasks/${taskId}`,
+        "PATCH",
+        payload.details
+      );
+
+      if (
+        isManager &&
+        payload.assignedTo !== idOf(editingTask.assignedTo)
+      ) {
+        await mutate(
+          `/tasks/${taskId}/assign`,
+          "PATCH",
+          { assignedTo: payload.assignedTo }
+        );
+      }
+
+      if (
+        payload.status !== editingTask.status ||
+        payload.progress !== editingTask.progress
+      ) {
+        await mutate(
+          `/tasks/${taskId}/status`,
+          "PATCH",
+          {
+            status: payload.status,
+            progress: payload.progress,
+          }
+        );
+      }
+    }
+
+    setModalOpen(false);
+    setEditingTask(null);
+    refresh();
+  };
+
+  const deleteTask = async (task) => {
+    if (!isManager || busy) return;
+
+    if (!window.confirm(`Delete task "${task.title}"?`)) {
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError("");
+
+      await mutate(`/tasks/${idOf(task)}`, "DELETE");
+
+      if (viewingTaskId === idOf(task)) {
+        setViewingTaskId(null);
+      }
+
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markCompleted = async (task) => {
+    if (busy) return;
+
+    const completed = task.status === "Completed";
+
+    try {
+      setBusy(true);
+      setError("");
+
+      await mutate(
+        `/tasks/${idOf(task)}/status`,
+        "PATCH",
+        {
+          status: completed ? "Todo" : "Completed",
+          progress: completed ? 0 : 100,
+        }
+      );
+
+      refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const employeeNames = useMemo(
     () =>
       [...new Set(
-        tasks
-          .map((task) => task.assignedTo)
-          .filter(Boolean)
+        tasks.map((task) => task.assignedTo?.name).filter(Boolean)
       )].sort(),
     [tasks]
   );
 
-  const stats = useMemo(() => {
-    const active = tasks.filter(
-      (task) =>
-        task.status !== "Completed" &&
-        task.status !== "Cancelled"
-    );
-
-    return {
-      total: tasks.length,
-      todo: tasks.filter(
-        (task) => task.status === "To Do"
-      ).length,
-      inProgress: tasks.filter(
-        (task) => task.status === "In Progress"
-      ).length,
-      completed: tasks.filter(
-        (task) => task.status === "Completed"
-      ).length,
-      overdue: active.filter((task) =>
-        isOverdue(task, today)
-      ).length,
-    };
-  }, [tasks, today]);
+  const stats = useMemo(() => ({
+    total: tasks.length,
+    todo: tasks.filter((task) => task.status === "Todo").length,
+    inProgress: tasks.filter(
+      (task) => task.status === "In Progress"
+    ).length,
+    completed: tasks.filter(
+      (task) => task.status === "Completed"
+    ).length,
+    overdue: tasks.filter(
+      (task) => isOverdue(task, today)
+    ).length,
+  }), [tasks, today]);
 
   const filteredTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
-
-    const priorityRank = {
-      Urgent: 0,
-      High: 1,
-      Medium: 2,
-      Low: 3,
-    };
+    const rank = { Urgent: 0, High: 1, Medium: 2, Low: 3 };
 
     return tasks
       .filter((task) => {
         const matchesSearch = [
           task.title,
           task.description,
-          task.projectName,
-          task.assignedTo,
+          task.project?.name,
+          task.assignedTo?.name,
         ].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query)
+          String(value || "").toLowerCase().includes(query)
         );
-
-        const matchesStatus =
-          statusFilter === "All" ||
-          (statusFilter === "Overdue"
-            ? isOverdue(task, today)
-            : task.status === statusFilter);
 
         return (
           matchesSearch &&
-          matchesStatus &&
+          (statusFilter === "All" ||
+            (statusFilter === "Overdue"
+              ? isOverdue(task, today)
+              : task.status === statusFilter)) &&
           (priorityFilter === "All" ||
             task.priority === priorityFilter) &&
           (employeeFilter === "All" ||
-            task.assignedTo === employeeFilter)
+            task.assignedTo?.name === employeeFilter)
         );
       })
       .sort((a, b) => {
-        const aDone =
-          a.status === "Completed" ||
-          a.status === "Cancelled";
-        const bDone =
-          b.status === "Completed" ||
-          b.status === "Cancelled";
+        const aDone = ["Completed", "Cancelled"].includes(a.status);
+        const bDone = ["Completed", "Cancelled"].includes(b.status);
 
         if (aDone !== bDone) return aDone ? 1 : -1;
 
-        const priorityDifference =
-          (priorityRank[a.priority] ?? 4) -
-          (priorityRank[b.priority] ?? 4);
+        const difference =
+          (rank[a.priority] ?? 4) - (rank[b.priority] ?? 4);
 
-        if (priorityDifference) return priorityDifference;
+        if (difference) return difference;
 
-        return (a.dueDate || "9999-12-31").localeCompare(
-          b.dueDate || "9999-12-31"
+        return String(a.dueDate || "9999").localeCompare(
+          String(b.dueDate || "9999")
         );
       });
   }, [
-    tasks,
-    search,
-    statusFilter,
-    priorityFilter,
-    employeeFilter,
-    today,
+    tasks, search, statusFilter,
+    priorityFilter, employeeFilter, today,
   ]);
 
   const viewingTask = tasks.find(
-    (task) => task.id === viewingTaskId
+    (task) => idOf(task) === viewingTaskId
   );
 
-  const saveTask = (form) => {
-    const timestamp = new Date().toISOString();
-
-    if (editingTask) {
-      setTasks((previous) =>
-        previous.map((task) =>
-          task.id === editingTask.id
-            ? {
-                ...task,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : task
-        )
-      );
-    } else {
-      setTasks((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
-    }
-
-    setModalOpen(false);
-    setEditingTask(null);
-  };
-
-  const deleteTask = (task) => {
-    if (
-      !window.confirm(
-        `Delete task "${task.title}"?`
-      )
-    ) {
-      return;
-    }
-
-    setTasks((previous) =>
-      previous.filter(
-        (item) => item.id !== task.id
-      )
-    );
-
-    if (viewingTaskId === task.id) {
-      setViewingTaskId(null);
-    }
-  };
-
-  const markCompleted = (task) => {
-    setTasks((previous) =>
-      previous.map((item) =>
-        item.id === task.id
-          ? {
-              ...item,
-              status:
-                item.status === "Completed"
-                  ? "To Do"
-                  : "Completed",
-              progress:
-                item.status === "Completed"
-                  ? 0
-                  : 100,
-              updatedAt: new Date().toISOString(),
-            }
-          : item
-      )
-    );
-  };
-
   const cards = [
-    {
-      label: "Total Tasks",
-      value: stats.total,
-      icon: ClipboardList,
-    },
-    {
-      label: "To Do",
-      value: stats.todo,
-      icon: ListTodo,
-    },
-    {
-      label: "In Progress",
-      value: stats.inProgress,
-      icon: Clock3,
-    },
-    {
-      label: "Completed",
-      value: stats.completed,
-      icon: CheckCircle2,
-    },
-    {
-      label: "Overdue",
-      value: stats.overdue,
-      icon: AlertTriangle,
-    },
+    { label: "Total Tasks", value: stats.total, Icon: ClipboardList },
+    { label: "To Do", value: stats.todo, Icon: ListTodo },
+    { label: "In Progress", value: stats.inProgress, Icon: Clock3 },
+    { label: "Completed", value: stats.completed, Icon: CheckCircle2 },
+    { label: "Overdue", value: stats.overdue, Icon: AlertTriangle },
   ];
 
   return (
     <div className="tasks">
       <div className="tasks__header">
         <div>
-          <span className="tasks__eyebrow">
-            WORK MANAGEMENT
-          </span>
+          <span className="tasks__eyebrow">WORK MANAGEMENT</span>
           <h1>Task Management</h1>
           <p>
-            Assign tasks, monitor progress and track
-            project deadlines.
+            Assign tasks, monitor progress and track project deadlines.
           </p>
         </div>
 
-        <button
-          type="button"
-          className="tasks__button tasks__button--primary"
-          onClick={() => {
-            setEditingTask(null);
-            setModalOpen(true);
-          }}
-        >
-          <Plus size={18} />
-          Create Task
-        </button>
+        {isManager && (
+          <button
+            type="button"
+            className="tasks__button tasks__button--primary"
+            onClick={() => void openForm()}
+            disabled={busy}
+          >
+            <Plus size={18} />
+            Create Task
+          </button>
+        )}
       </div>
 
-      {storageError && (
+      {error && (
         <div className="tasks__error" role="alert">
-          {storageError}
+          {error}
         </div>
       )}
 
       <div className="tasks__stats">
-        {cards.map(({ label, value, icon: Icon }) => (
+        {cards.map(({ label, value, Icon }) => (
           <div className="tasks__stat" key={label}>
             <Icon size={21} />
             <span>{label}</span>
@@ -859,9 +918,7 @@ export default function Tasks() {
               <ClipboardList size={19} />
               All Tasks
             </h2>
-            <p>
-              Manage assignments, priorities and progress.
-            </p>
+            <p>Manage assignments, priorities and progress.</p>
           </div>
         </div>
 
@@ -871,9 +928,7 @@ export default function Tasks() {
             <input
               type="search"
               value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
+              onChange={(event) => setSearch(event.target.value)}
               placeholder="Search tasks, projects, employees..."
               aria-label="Search tasks"
             />
@@ -884,45 +939,35 @@ export default function Tasks() {
 
             <select
               value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value)
-              }
+              onChange={(event) => setStatusFilter(event.target.value)}
               aria-label="Filter task status"
             >
               <option value="All">All Statuses</option>
-
               {STATUSES.map((status) => (
-                <option key={status}>{status}</option>
+                <option key={status} value={status}>
+                  {displayStatus(status)}
+                </option>
               ))}
-
               <option value="Overdue">Overdue</option>
             </select>
 
             <select
               value={priorityFilter}
-              onChange={(event) =>
-                setPriorityFilter(event.target.value)
-              }
+              onChange={(event) => setPriorityFilter(event.target.value)}
               aria-label="Filter priority"
             >
               <option value="All">All Priorities</option>
-
               {PRIORITIES.map((priority) => (
-                <option key={priority}>
-                  {priority}
-                </option>
+                <option key={priority}>{priority}</option>
               ))}
             </select>
 
             <select
               value={employeeFilter}
-              onChange={(event) =>
-                setEmployeeFilter(event.target.value)
-              }
+              onChange={(event) => setEmployeeFilter(event.target.value)}
               aria-label="Filter employee"
             >
               <option value="All">All Employees</option>
-
               {employeeNames.map((name) => (
                 <option key={name}>{name}</option>
               ))}
@@ -947,24 +992,19 @@ export default function Tasks() {
 
             <tbody>
               {filteredTasks.map((task) => {
-                const overdue = isOverdue(
-                  task,
-                  today
-                );
+                const overdue = isOverdue(task, today);
 
                 return (
-                  <tr key={task.id}>
+                  <tr key={idOf(task)}>
                     <td>
                       <div className="tasks__identity">
                         <span className="tasks__avatar">
                           <ClipboardList size={18} />
                         </span>
-
                         <div>
                           <strong>{task.title}</strong>
                           <small>
-                            {task.description ||
-                              "No description"}
+                            {task.description || "No description"}
                           </small>
                         </div>
                       </div>
@@ -973,14 +1013,14 @@ export default function Tasks() {
                     <td>
                       <span className="tasks__reference">
                         <FolderKanban size={14} />
-                        {task.projectName || "—"}
+                        {task.project?.name || "—"}
                       </span>
                     </td>
 
                     <td>
                       <span className="tasks__reference">
                         <UserRound size={14} />
-                        {task.assignedTo || "Unassigned"}
+                        {task.assignedTo?.name || "Unassigned"}
                       </span>
                     </td>
 
@@ -995,31 +1035,22 @@ export default function Tasks() {
 
                     <td>
                       <div className="tasks__due">
-                        <span
-                          className={
-                            overdue
-                              ? "tasks__due-date tasks__due-date--overdue"
-                              : "tasks__due-date"
-                          }
-                        >
+                        <span className={overdue ? "tasks__overdue" : ""}>
                           <CalendarDays size={14} />
                           {formatDate(task.dueDate)}
                         </span>
-
-                        {overdue && (
-                          <small>Overdue</small>
-                        )}
+                        {overdue && <small>Overdue</small>}
                       </div>
                     </td>
 
                     <td>
                       <div className="tasks__progress">
-                        <span>{task.progress}%</span>
+                        <div className="tasks__progress-label">
+                          <span>{task.progress}%</span>
+                        </div>
                         <div className="tasks__progress-track">
                           <span
-                            style={{
-                              width: `${task.progress}%`,
-                            }}
+                            style={{ width: `${task.progress}%` }}
                           />
                         </div>
                       </div>
@@ -1027,11 +1058,9 @@ export default function Tasks() {
 
                     <td>
                       <span
-                        className={`tasks__badge tasks__badge--${getStatusClass(
-                          task.status
-                        )}`}
+                        className={`tasks__badge tasks__badge--${statusClass(task.status)}`}
                       >
-                        {task.status}
+                        {displayStatus(task.status)}
                       </span>
                     </td>
 
@@ -1039,11 +1068,8 @@ export default function Tasks() {
                       <div className="tasks__actions">
                         <button
                           type="button"
-                          title="View details"
-                          aria-label={`View ${task.title}`}
-                          onClick={() =>
-                            setViewingTaskId(task.id)
-                          }
+                          title="View task"
+                          onClick={() => setViewingTaskId(idOf(task))}
                         >
                           <Eye size={16} />
                         </button>
@@ -1051,51 +1077,38 @@ export default function Tasks() {
                         <button
                           type="button"
                           title="Edit task"
-                          aria-label={`Edit ${task.title}`}
-                          onClick={() => {
-                            setEditingTask(task);
-                            setModalOpen(true);
-                          }}
+                          disabled={busy}
+                          onClick={() => void openForm(task)}
                         >
                           <Pencil size={16} />
                         </button>
 
-                        {task.status !== "Cancelled" && (
-                          <button
-                            type="button"
-                            title={
-                              task.status === "Completed"
-                                ? "Reopen task"
-                                : "Mark completed"
-                            }
-                            aria-label={
-                              task.status === "Completed"
-                                ? `Reopen ${task.title}`
-                                : `Complete ${task.title}`
-                            }
-                            onClick={() =>
-                              markCompleted(task)
-                            }
-                          >
-                            {task.status === "Completed" ? (
-                              <RotateCcw size={16} />
-                            ) : (
-                              <CheckCircle2 size={16} />
-                            )}
-                          </button>
-                        )}
-
                         <button
                           type="button"
-                          className="tasks__delete"
-                          title="Delete task"
-                          aria-label={`Delete ${task.title}`}
-                          onClick={() =>
-                            deleteTask(task)
+                          title={
+                            task.status === "Completed"
+                              ? "Reopen task"
+                              : "Mark completed"
                           }
+                          disabled={busy}
+                          onClick={() => void markCompleted(task)}
                         >
-                          <Trash2 size={16} />
+                          {task.status === "Completed"
+                            ? <RotateCcw size={16} />
+                            : <CheckCircle2 size={16} />}
                         </button>
+
+                        {isManager && (
+                          <button
+                            type="button"
+                            className="tasks__delete"
+                            title="Delete task"
+                            disabled={busy}
+                            onClick={() => void deleteTask(task)}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1107,26 +1120,16 @@ export default function Tasks() {
                   <td colSpan={8}>
                     <div className="tasks__empty">
                       <ClipboardList size={36} />
-                      <h3>No tasks found</h3>
+                      <h3>
+                        {loading
+                          ? "Loading tasks..."
+                          : "No tasks found"}
+                      </h3>
                       <p>
-                        {tasks.length === 0
-                          ? "Create your first task to start tracking work."
-                          : "Try adjusting your filters or search."}
+                        {loading
+                          ? "Fetching records from backend."
+                          : "Create a task or adjust your filters."}
                       </p>
-
-                      {tasks.length === 0 && (
-                        <button
-                          type="button"
-                          className="tasks__button tasks__button--primary"
-                          onClick={() => {
-                            setEditingTask(null);
-                            setModalOpen(true);
-                          }}
-                        >
-                          <Plus size={16} />
-                          Create Task
-                        </button>
-                      )}
                     </div>
                   </td>
                 </tr>
@@ -1136,15 +1139,16 @@ export default function Tasks() {
         </div>
 
         <div className="tasks__table-footer">
-          Showing {filteredTasks.length} of{" "}
-          {tasks.length} tasks
+          Showing {filteredTasks.length} of {tasks.length} tasks
         </div>
       </section>
 
       {modalOpen && (
         <TaskModal
           task={editingTask}
+          projects={projects}
           employees={employees}
+          isManager={isManager}
           onClose={() => {
             setModalOpen(false);
             setEditingTask(null);
@@ -1156,11 +1160,11 @@ export default function Tasks() {
       {viewingTask && (
         <TaskDetails
           task={viewingTask}
+          canEdit
           onClose={() => setViewingTaskId(null)}
           onEdit={() => {
-            setEditingTask(viewingTask);
             setViewingTaskId(null);
-            setModalOpen(true);
+            void openForm(viewingTask);
           }}
         />
       )}

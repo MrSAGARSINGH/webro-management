@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
   TrendingUp,
@@ -18,7 +18,6 @@ import {
   ArrowUpRight,
   Filter,
 } from "lucide-react";
-
 import {
   ResponsiveContainer,
   AreaChart,
@@ -34,18 +33,11 @@ import {
   Cell,
   Legend,
 } from "recharts";
-
 import "./Reports.scss";
 
-const KEYS = {
-  leads: "webro-management-leads-v1",
-  clients: "webro-management-clients-v1",
-  calling: "webro-management-calling-v1",
-  projects: "webro-management-projects-v1",
-  payments: "webro-management-payments-v1",
-  employees: "webro-management-employees-v1",
-  tasks: "webro-management-tasks-v1",
-};
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
 const COLORS = [
   "#a3e635",
@@ -55,6 +47,20 @@ const COLORS = [
   "#fb7185",
   "#34d399",
 ];
+
+const EMPTY_DATA = {
+  overview: {},
+  revenue: {},
+  leadAnalytics: {},
+  projectAnalytics: {},
+  taskAnalytics: {},
+  leads: [],
+  clients: [],
+  projects: [],
+  tasks: [],
+  calls: [],
+  employees: [],
+};
 
 const money = (value) =>
   new Intl.NumberFormat("en-IN", {
@@ -69,55 +75,37 @@ const compactMoney = (value) =>
     maximumFractionDigits: 1,
   }).format(Number(value) || 0);
 
-function readArray(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    const parsed = raw ? JSON.parse(raw) : [];
+const idOf = (value) =>
+  typeof value === "string"
+    ? value
+    : value?._id || value?.id || "";
 
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
+const pad = (value) => String(value).padStart(2, "0");
 
-function readData() {
-  return Object.fromEntries(
-    Object.entries(KEYS).map(([name, key]) => [
-      name,
-      readArray(key),
-    ])
-  );
-}
+const localDate = (date) =>
+  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}`;
 
-function dateKey(value) {
-  if (typeof value !== "string") return "";
+const dateKey = (value) => {
+  if (!value) return "";
 
-  const key = value.slice(0, 10);
+  const date = new Date(value);
 
-  return /^\d{4}-\d{2}-\d{2}$/.test(key)
-    ? key
-    : "";
-}
+  if (Number.isNaN(date.getTime())) return "";
 
-function todayKey() {
-  const date = new Date();
-  const pad = (value) =>
-    String(value).padStart(2, "0");
+  return localDate(date);
+};
 
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
-}
+const monthKey = (value) => dateKey(value).slice(0, 7);
 
 function getRange(period) {
   const now = new Date();
-  const end = todayKey();
+  const start = new Date(now);
 
   if (period === "all") {
-    return { start: "", end };
+    return { start: "", end: localDate(now) };
   }
-
-  const start = new Date(now);
 
   if (period === "7d") {
     start.setDate(start.getDate() - 6);
@@ -129,48 +117,20 @@ function getRange(period) {
     start.setDate(1);
   }
 
-  const pad = (value) =>
-    String(value).padStart(2, "0");
-
   return {
-    start: `${start.getFullYear()}-${pad(
-      start.getMonth() + 1
-    )}-${pad(start.getDate())}`,
-    end,
+    start: localDate(start),
+    end: localDate(now),
   };
 }
 
 function inRange(value, range) {
-  const date = dateKey(value);
+  const key = dateKey(value);
 
   return Boolean(
-    date &&
-      (!range.start || date >= range.start) &&
-      date <= range.end
+    key &&
+      (!range.start || key >= range.start) &&
+      key <= range.end
   );
-}
-
-function getPaymentTransactions(payment) {
-  if (!Array.isArray(payment.installments)) {
-    return [];
-  }
-
-  return payment.installments
-    .filter(
-      (item) =>
-        item &&
-        Number.isFinite(Number(item.amount)) &&
-        Number(item.amount) > 0
-    )
-    .map((item) => ({
-      amount: Number(item.amount),
-      date: item.date || "",
-    }));
-}
-
-function getMonthKey(value) {
-  const key = dateKey(value);
-  return key ? key.slice(0, 7) : "";
 }
 
 function getMonths(count = 6) {
@@ -179,65 +139,100 @@ function getMonths(count = 6) {
   return Array.from({ length: count }, (_, index) => {
     const date = new Date(
       now.getFullYear(),
-      now.getMonth() - (count - index - 1),
+      now.getMonth() - count + index + 1,
       1
     );
 
     return {
-      key: `${date.getFullYear()}-${String(
-        date.getMonth() + 1
-      ).padStart(2, "0")}`,
-      label: new Intl.DateTimeFormat("en-IN", {
+      key: `${date.getFullYear()}-${pad(date.getMonth() + 1)}`,
+      label: date.toLocaleDateString("en-IN", {
         month: "short",
         year: "2-digit",
-      }).format(date),
+      }),
     };
   });
 }
 
-function percent(part, total) {
-  return total > 0
-    ? Math.round((part / total) * 100)
-    : 0;
+const percent = (part, total) =>
+  total > 0 ? Math.round((part / total) * 100) : 0;
+
+async function api(path, signal) {
+  const response = await fetch(`${API_URL}${path}`, {
+    credentials: "include",
+    headers: {
+      Accept: "application/json",
+    },
+    signal,
+  });
+
+  const result = await response.json().catch(() => null);
+
+  if (!response.ok || result?.success !== true) {
+    throw new Error(
+      result?.message ||
+        `Request failed (${response.status})`
+    );
+  }
+
+  return result;
+}
+
+async function fetchAll(path, key, signal) {
+  const records = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const separator = path.includes("?") ? "&" : "?";
+
+    const result = await api(
+      `${path}${separator}page=${page}&limit=100`,
+      signal
+    );
+
+    if (!Array.isArray(result[key])) {
+      throw new Error(`Invalid ${key} response.`);
+    }
+
+    records.push(...result[key]);
+
+    totalPages = result.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages);
+
+  return records;
 }
 
 function safeCsv(value) {
-  const text = String(value ?? "");
+  const raw = String(value ?? "");
+  const protectedValue = /^[=+\-@\t\r]/.test(raw.trimStart())
+    ? `'${raw}`
+    : raw;
 
-  const escaped = /^[=+\-@\t\r]/.test(
-    text.trimStart()
-  )
-    ? `'${text}`
-    : text;
-
-  return `"${escaped.replace(/"/g, '""')}"`;
+  return `"${protectedValue.replace(/"/g, '""')}"`;
 }
 
 function exportCsv(filename, headers, rows) {
   const content = [
     headers.map(safeCsv).join(","),
-    ...rows.map((row) =>
-      row.map(safeCsv).join(",")
-    ),
+    ...rows.map((row) => row.map(safeCsv).join(",")),
   ].join("\r\n");
 
-  const blob = new Blob(
-    ["\uFEFF", content],
-    {
-      type: "text/csv;charset=utf-8;",
-    }
-  );
+  const blob = new Blob(["\uFEFF", content], {
+    type: "text/csv;charset=utf-8;",
+  });
 
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
 
   link.href = url;
   link.download = filename;
+
   document.body.appendChild(link);
   link.click();
   link.remove();
 
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function MetricCard({
@@ -248,9 +243,7 @@ function MetricCard({
   tone = "default",
 }) {
   return (
-    <article
-      className={`reports__metric reports__metric--${tone}`}
-    >
+    <article className={`reports__metric reports__metric--${tone}`}>
       <div className="reports__metric-top">
         <span>{title}</span>
         <div className="reports__metric-icon">
@@ -275,14 +268,11 @@ function ChartPanel({
   className = "",
 }) {
   return (
-    <section
-      className={`reports__chart-panel ${className}`}
-    >
+    <section className={`reports__chart-panel ${className}`}>
       <div className="reports__panel-heading">
         <h2>{title}</h2>
         <p>{subtitle}</p>
       </div>
-
       {children}
     </section>
   );
@@ -297,41 +287,90 @@ const tooltipStyle = {
 };
 
 export default function Reports() {
-  const [data, setData] = useState(readData);
+  const [data, setData] = useState(EMPTY_DATA);
   const [period, setPeriod] = useState("30d");
-  const [lastUpdated, setLastUpdated] =
-    useState(new Date());
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [revision, setRevision] = useState(0);
 
-  const refresh = () => {
-    setData(readData());
-    setLastUpdated(new Date());
-  };
-
-  useEffect(() => {
-    const handleRefresh = () => {
-      setData(readData());
-      setLastUpdated(new Date());
-    };
-
-    window.addEventListener("focus", handleRefresh);
-    window.addEventListener("storage", handleRefresh);
-
-    return () => {
-      window.removeEventListener(
-        "focus",
-        handleRefresh
-      );
-      window.removeEventListener(
-        "storage",
-        handleRefresh
-      );
-    };
+  const refresh = useCallback(() => {
+    setRevision((value) => value + 1);
   }, []);
 
-  const range = useMemo(
-    () => getRange(period),
-    [period]
-  );
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function load() {
+      setLoading(true);
+      setError("");
+
+      try {
+        const [
+          overview,
+          revenue,
+          leadAnalytics,
+          projectAnalytics,
+          taskAnalytics,
+          leads,
+          clients,
+          projects,
+          tasks,
+          calls,
+          employees,
+        ] = await Promise.all([
+          api("/dashboard/overview", controller.signal),
+          api("/dashboard/revenue", controller.signal),
+          api("/dashboard/leads", controller.signal),
+          api("/dashboard/projects", controller.signal),
+          api("/dashboard/tasks", controller.signal),
+          fetchAll("/leads", "leads", controller.signal),
+          fetchAll("/clients", "clients", controller.signal),
+          fetchAll("/projects", "projects", controller.signal),
+          fetchAll("/tasks", "tasks", controller.signal),
+          fetchAll("/calls", "calls", controller.signal),
+          fetchAll("/employees", "employees", controller.signal),
+        ]);
+
+        if (controller.signal.aborted) return;
+
+        setData({
+          overview: overview.data || {},
+          revenue: revenue.data || {},
+          leadAnalytics: leadAnalytics.data || {},
+          projectAnalytics: projectAnalytics.data || {},
+          taskAnalytics: taskAnalytics.data || {},
+          leads,
+          clients,
+          projects,
+          tasks,
+          calls,
+          employees,
+        });
+
+        setLastUpdated(new Date());
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(err.message || "Unable to load reports.");
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => controller.abort();
+  }, [revision]);
+
+  useEffect(() => {
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
+
+  const range = useMemo(() => getRange(period), [period]);
 
   const analytics = useMemo(() => {
     const leads = data.leads.filter((item) =>
@@ -350,59 +389,15 @@ export default function Reports() {
       inRange(item.createdAt, range)
     );
 
-    const calls = data.calling.filter((item) =>
+    const calls = data.calls.filter((item) =>
       inRange(
-        item.callDate || item.date || item.createdAt,
+        item.callDate || item.createdAt,
         range
       )
     );
 
-    const payments = data.payments;
-
-    const transactions = payments.flatMap(
-      getPaymentTransactions
-    );
-
-    const filteredTransactions =
-      transactions.filter((item) =>
-        inRange(item.date, range)
-      );
-
-    const revenue = filteredTransactions.reduce(
-      (sum, item) => sum + item.amount,
-      0
-    );
-
-    const contractedValue = projects.reduce(
-      (sum, item) =>
-        sum + (Number(item.budget) || 0),
-      0
-    );
-
-    const outstanding = payments.reduce(
-      (sum, item) => {
-        const total = Number(
-          item.totalAmount || 0
-        );
-
-        const received =
-          getPaymentTransactions(item).reduce(
-            (totalReceived, transaction) =>
-              totalReceived + transaction.amount,
-            0
-          );
-
-        return (
-          sum + Math.max(0, total - received)
-        );
-      },
-      0
-    );
-
     const wonLeads = leads.filter((item) =>
-      ["won", "converted", "closed won"].includes(
-        String(item.status || "").toLowerCase()
-      )
+      ["Won", "Converted", "Closed Won"].includes(item.status)
     ).length;
 
     const completedProjects = projects.filter(
@@ -413,14 +408,14 @@ export default function Reports() {
       (item) => item.status === "Completed"
     ).length;
 
-    const overdueTasks = data.tasks.filter(
-      (item) =>
-        item.dueDate &&
-        dateKey(item.dueDate) < todayKey() &&
-        !["Completed", "Cancelled"].includes(
-          item.status
-        )
-    ).length;
+    const overdueTasks =
+      data.taskAnalytics.overdue ??
+      data.tasks.filter(
+        (item) =>
+          item.dueDate &&
+          dateKey(item.dueDate) < localDate(new Date()) &&
+          !["Completed", "Cancelled"].includes(item.status)
+      ).length;
 
     const leadStatuses = Object.entries(
       leads.reduce((acc, lead) => {
@@ -428,84 +423,71 @@ export default function Reports() {
         acc[status] = (acc[status] || 0) + 1;
         return acc;
       }, {})
-    ).map(([name, value]) => ({
-      name,
-      value,
-    }));
+    ).map(([name, value]) => ({ name, value }));
 
     const projectStatuses = Object.entries(
       projects.reduce((acc, project) => {
-        const status =
-          project.status || "Unknown";
-
+        const status = project.status || "Unknown";
         acc[status] = (acc[status] || 0) + 1;
-
         return acc;
       }, {})
-    ).map(([name, value]) => ({
-      name,
-      value,
+    ).map(([name, value]) => ({ name, value }));
+
+    const months = getMonths(6);
+
+    const monthlyRevenue = months.map((month) => {
+      const entry = (data.revenue.monthlyRevenue || []).find(
+        (item) => item.month === month.key
+      );
+
+      return {
+        month: month.label,
+        revenue: Number(entry?.total) || 0,
+      };
+    });
+
+    const monthlyLeads = months.map((month) => ({
+      month: month.label,
+      leads: data.leads.filter(
+        (item) => monthKey(item.createdAt) === month.key
+      ).length,
+      clients: data.clients.filter(
+        (item) => monthKey(item.createdAt) === month.key
+      ).length,
     }));
 
-    const monthlyRevenue = getMonths(6).map(
-      (month) => ({
-        month: month.label,
-        revenue: transactions
-          .filter(
-            (item) =>
-              getMonthKey(item.date) === month.key
-          )
-          .reduce(
-            (sum, item) => sum + item.amount,
-            0
-          ),
-      })
-    );
-
-    const monthlyLeads = getMonths(6).map(
-      (month) => ({
-        month: month.label,
-        leads: data.leads.filter(
-          (item) =>
-            getMonthKey(item.createdAt) ===
-            month.key
-        ).length,
-        clients: data.clients.filter(
-          (item) =>
-            getMonthKey(item.createdAt) ===
-            month.key
-        ).length,
-      })
-    );
-
     const employeePerformance = data.employees
-      .filter(
-        (employee) =>
-          employee.status !== "Inactive"
-      )
+      .filter((employee) => employee.status !== "Inactive")
       .map((employee) => {
-        const employeeTasks = data.tasks.filter(
-          (task) =>
-            task.assignedTo === employee.name
-        );
+        const userId = idOf(employee.user);
+        const employeeId = idOf(employee);
+
+        const assignedTasks = data.tasks.filter((task) => {
+          const assigneeId = idOf(task.assignedTo);
+          return Boolean(
+            assigneeId &&
+              (assigneeId === userId || assigneeId === employeeId)
+          );
+        });
 
         return {
-          name: employee.name,
+          id: employeeId,
+          name: employee.name || employee.user?.name || "Employee",
           department: employee.department || "—",
-          assigned: employeeTasks.length,
-          completed: employeeTasks.filter(
-            (task) =>
-              task.status === "Completed"
+          assigned: assignedTasks.length,
+          completed: assignedTasks.filter(
+            (task) => task.status === "Completed"
           ).length,
-          active: employeeTasks.filter(
+          active: assignedTasks.filter(
             (task) =>
-              !["Completed", "Cancelled"].includes(
-                task.status
-              )
+              !["Completed", "Cancelled"].includes(task.status)
           ).length,
         };
       })
       .sort((a, b) => b.assigned - a.assigned);
+
+    const outstanding =
+      Number(data.overview.invoices?.outstanding) || 0;
 
     return {
       leads: leads.length,
@@ -513,25 +495,18 @@ export default function Reports() {
       projects: projects.length,
       tasks: tasks.length,
       calls: calls.length,
-      revenue,
-      contractedValue,
-      outstanding,
       wonLeads,
-      conversionRate: percent(
-        wonLeads,
-        leads.length
-      ),
+      conversionRate: percent(wonLeads, leads.length),
       completedProjects,
       projectCompletion: percent(
         completedProjects,
         projects.length
       ),
       completedTasks,
-      taskCompletion: percent(
-        completedTasks,
-        tasks.length
-      ),
+      taskCompletion: percent(completedTasks, tasks.length),
       overdueTasks,
+      outstanding,
+      revenue: Number(data.revenue.total) || 0,
       leadStatuses,
       projectStatuses,
       monthlyRevenue,
@@ -541,24 +516,25 @@ export default function Reports() {
   }, [data, range]);
 
   const handleExport = () => {
-    const rows = [
-      ["Revenue Received", analytics.revenue],
-      ["New Leads", analytics.leads],
-      ["New Clients", analytics.clients],
-      ["Lead Conversion Rate", `${analytics.conversionRate}%`],
-      ["New Projects", analytics.projects],
-      ["Completed Projects", analytics.completedProjects],
-      ["New Tasks", analytics.tasks],
-      ["Completed Tasks", analytics.completedTasks],
-      ["Calls Logged", analytics.calls],
-      ["Current Outstanding", analytics.outstanding],
-      ["Current Overdue Tasks", analytics.overdueTasks],
-    ];
+    if (loading || error) return;
 
     exportCsv(
-      `webro-report-${period}-${todayKey()}.csv`,
+      `webro-report-${period}-${localDate(new Date())}.csv`,
       ["Metric", "Value"],
-      rows
+      [
+        ["Reporting Period", period],
+        ["Revenue (Last 6 Months)", analytics.revenue],
+        ["New Leads", analytics.leads],
+        ["New Clients", analytics.clients],
+        ["Lead Conversion Rate", `${analytics.conversionRate}%`],
+        ["New Projects", analytics.projects],
+        ["Completed Projects", analytics.completedProjects],
+        ["New Tasks", analytics.tasks],
+        ["Completed Tasks", analytics.completedTasks],
+        ["Calls Logged", analytics.calls],
+        ["Current Invoice Outstanding", analytics.outstanding],
+        ["Current Overdue Tasks", analytics.overdueTasks],
+      ]
     );
   };
 
@@ -566,7 +542,7 @@ export default function Reports() {
     {
       title: "Revenue Received",
       value: money(analytics.revenue),
-      subtitle: "Received during selected period",
+      subtitle: "Last 6 months — backend verified",
       icon: IndianRupee,
       tone: "success",
     },
@@ -604,7 +580,7 @@ export default function Reports() {
     {
       title: "Current Outstanding",
       value: money(analytics.outstanding),
-      subtitle: "Across all payment accounts",
+      subtitle: "Across all invoices",
       icon: Wallet,
       tone: "warning",
     },
@@ -625,7 +601,7 @@ export default function Reports() {
             BUSINESS INTELLIGENCE
           </span>
 
-          <h1>Reports & Analytics</h1>
+          <h1>Reports &amp; Analytics</h1>
 
           <p>
             Monitor business performance, revenue,
@@ -638,15 +614,17 @@ export default function Reports() {
             type="button"
             className="reports__button reports__button--secondary"
             onClick={refresh}
+            disabled={loading}
           >
             <RefreshCw size={16} />
-            Refresh
+            {loading ? "Loading..." : "Refresh"}
           </button>
 
           <button
             type="button"
             className="reports__button reports__button--primary"
             onClick={handleExport}
+            disabled={loading || Boolean(error)}
           >
             <Download size={16} />
             Export CSV
@@ -654,17 +632,20 @@ export default function Reports() {
         </div>
       </div>
 
+      {error && (
+        <div className="reports__error" role="alert">
+          {error}
+        </div>
+      )}
+
       <div className="reports__filter-bar">
         <div>
           <Filter size={17} />
-
           <span>Reporting Period</span>
 
           <select
             value={period}
-            onChange={(event) =>
-              setPeriod(event.target.value)
-            }
+            onChange={(event) => setPeriod(event.target.value)}
             aria-label="Reporting period"
           >
             <option value="7d">Last 7 Days</option>
@@ -677,40 +658,30 @@ export default function Reports() {
 
         <span className="reports__updated">
           <CalendarDays size={14} />
-          Updated{" "}
-          {lastUpdated.toLocaleTimeString("en-IN", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
+          {lastUpdated
+            ? `Updated ${lastUpdated.toLocaleTimeString("en-IN", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`
+            : "Not updated"}
         </span>
       </div>
 
       <div className="reports__metrics">
         {metrics.map((metric) => (
-          <MetricCard
-            key={metric.title}
-            {...metric}
-          />
+          <MetricCard key={metric.title} {...metric} />
         ))}
       </div>
 
       <div className="reports__charts">
         <ChartPanel
           title="Revenue Overview"
-          subtitle="Monthly received payment transactions — last 6 calendar months"
+          subtitle="Completed payment revenue — last 6 calendar months"
           className="reports__chart-panel--wide"
         >
           <div className="reports__chart">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart
-                data={analytics.monthlyRevenue}
-                margin={{
-                  top: 12,
-                  right: 12,
-                  left: 0,
-                  bottom: 0,
-                }}
-              >
+              <AreaChart data={analytics.monthlyRevenue}>
                 <defs>
                   <linearGradient
                     id="revenueGradient"
@@ -781,15 +752,7 @@ export default function Reports() {
         >
           <div className="reports__chart">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={analytics.monthlyLeads}
-                margin={{
-                  top: 12,
-                  right: 12,
-                  left: 0,
-                  bottom: 0,
-                }}
-              >
+              <BarChart data={analytics.monthlyLeads}>
                 <CartesianGrid
                   stroke="#2a2a2e"
                   strokeDasharray="3 3"
@@ -812,10 +775,7 @@ export default function Reports() {
                   fontSize={11}
                 />
 
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                />
-
+                <Tooltip contentStyle={tooltipStyle} />
                 <Legend />
 
                 <Bar
@@ -842,10 +802,7 @@ export default function Reports() {
         >
           <div className="reports__chart">
             {analytics.leadStatuses.length ? (
-              <ResponsiveContainer
-                width="100%"
-                height="100%"
-              >
+              <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={analytics.leadStatuses}
@@ -855,21 +812,15 @@ export default function Reports() {
                     outerRadius={100}
                     paddingAngle={3}
                   >
-                    {analytics.leadStatuses.map(
-                      (_, index) => (
-                        <Cell
-                          key={index}
-                          fill={
-                            COLORS[index % COLORS.length]
-                          }
-                        />
-                      )
-                    )}
+                    {analytics.leadStatuses.map((item, index) => (
+                      <Cell
+                        key={item.name}
+                        fill={COLORS[index % COLORS.length]}
+                      />
+                    ))}
                   </Pie>
 
-                  <Tooltip
-                    contentStyle={tooltipStyle}
-                  />
+                  <Tooltip contentStyle={tooltipStyle} />
                   <Legend />
                 </PieChart>
               </ResponsiveContainer>
@@ -887,10 +838,7 @@ export default function Reports() {
         >
           <div className="reports__chart">
             {analytics.projectStatuses.length ? (
-              <ResponsiveContainer
-                width="100%"
-                height="100%"
-              >
+              <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={analytics.projectStatuses}
@@ -900,21 +848,15 @@ export default function Reports() {
                     outerRadius={100}
                     paddingAngle={3}
                   >
-                    {analytics.projectStatuses.map(
-                      (_, index) => (
-                        <Cell
-                          key={index}
-                          fill={
-                            COLORS[index % COLORS.length]
-                          }
-                        />
-                      )
-                    )}
+                    {analytics.projectStatuses.map((item, index) => (
+                      <Cell
+                        key={item.name}
+                        fill={COLORS[index % COLORS.length]}
+                      />
+                    ))}
                   </Pie>
 
-                  <Tooltip
-                    contentStyle={tooltipStyle}
-                  />
+                  <Tooltip contentStyle={tooltipStyle} />
                   <Legend />
                 </PieChart>
               </ResponsiveContainer>
@@ -934,9 +876,7 @@ export default function Reports() {
             Employee Workload
           </h2>
 
-          <p>
-            Current task assignments by employee.
-          </p>
+          <p>Current task assignments by employee.</p>
         </div>
 
         <div className="reports__table-wrap">
@@ -953,51 +893,34 @@ export default function Reports() {
             </thead>
 
             <tbody>
-              {analytics.employeePerformance.map(
-                (employee) => {
-                  const completion = percent(
-                    employee.completed,
-                    employee.assigned
-                  );
+              {analytics.employeePerformance.map((employee) => {
+                const completion = percent(
+                  employee.completed,
+                  employee.assigned
+                );
 
-                  return (
-                    <tr key={employee.name}>
-                      <td>
-                        <strong>
-                          {employee.name}
-                        </strong>
-                      </td>
-
-                      <td>
-                        {employee.department}
-                      </td>
-
-                      <td>{employee.assigned}</td>
-
-                      <td>
-                        {employee.completed}
-                      </td>
-
-                      <td>{employee.active}</td>
-
-                      <td>
-                        <div className="reports__progress">
-                          <div>
-                            <span
-                              style={{
-                                width: `${completion}%`,
-                              }}
-                            />
-                          </div>
-                          <strong>
-                            {completion}%
-                          </strong>
+                return (
+                  <tr key={employee.id}>
+                    <td>
+                      <strong>{employee.name}</strong>
+                    </td>
+                    <td>{employee.department}</td>
+                    <td>{employee.assigned}</td>
+                    <td>{employee.completed}</td>
+                    <td>{employee.active}</td>
+                    <td>
+                      <div className="reports__progress">
+                        <div>
+                          <span
+                            style={{ width: `${completion}%` }}
+                          />
                         </div>
-                      </td>
-                    </tr>
-                  );
-                }
-              )}
+                        <strong>{completion}%</strong>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
 
               {!analytics.employeePerformance.length && (
                 <tr>
@@ -1029,27 +952,22 @@ export default function Reports() {
         <div>
           <FolderKanban size={19} />
           <span>Completed Projects</span>
-          <strong>
-            {analytics.completedProjects}
-          </strong>
+          <strong>{analytics.completedProjects}</strong>
         </div>
 
         <div>
           <BarChart3 size={19} />
           <span>Project Completion</span>
-          <strong>
-            {analytics.projectCompletion}%
-          </strong>
+          <strong>{analytics.projectCompletion}%</strong>
         </div>
       </div>
 
       <p className="reports__disclaimer">
-        Analytics are calculated from browser-local records.
-        Period filters apply to creation dates for leads,
-        clients, projects and tasks; financial revenue uses
-        installment dates. Current outstanding balances and
-        overdue tasks are live totals, not historical snapshots.
-        The six-month charts use a fixed rolling six-month window.
+        Reports use authenticated backend records. The selected
+        period applies to leads, clients, projects, tasks and calls.
+        Revenue is based on the backend's fixed six-month
+        aggregation. Outstanding invoice balances and overdue
+        tasks are current totals, not historical snapshots.
       </p>
     </div>
   );

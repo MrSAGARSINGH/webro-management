@@ -49,10 +49,17 @@ const getCsrfSecret = () => {
 // Cookie Configuration
 // ======================================
 
+// Production:
+// SameSite=None + Secure=true allows
+// cross-site requests from Vercel to Render.
+//
+// Development:
+// SameSite=Strict preserves local security.
+
 const cookieOptions = {
   httpOnly: true,
   secure: IS_PRODUCTION,
-  sameSite: "strict",
+  sameSite: IS_PRODUCTION ? "none" : "strict",
   path: "/api",
 };
 

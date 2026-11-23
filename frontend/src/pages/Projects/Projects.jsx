@@ -1,5 +1,11 @@
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import {
   Plus,
   Search,
@@ -19,19 +25,30 @@ import {
   Layers3,
 } from "lucide-react";
 
+import { projectApi } from "../../services/projectApi.js";
+import { employeeApi } from "../../services/employeeApi.js";
+
 import "./Projects.scss";
 
-const STORAGE_KEY = "webro-management-projects-v1";
+// ======================================
+// Constants
+// ======================================
 
 const STATUSES = [
   "Planning",
   "In Progress",
   "On Hold",
+  "In Review",
   "Completed",
   "Cancelled",
 ];
 
-const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
+const PRIORITIES = [
+  "Low",
+  "Medium",
+  "High",
+  "Urgent",
+];
 
 const SERVICES = [
   "Website Development",
@@ -43,10 +60,11 @@ const SERVICES = [
   "Other",
 ];
 
+const PAGE_SIZE = 100;
+
 const EMPTY_FORM = {
   name: "",
-  clientName: "",
-  business: "",
+  client: "",
   service: "Website Development",
   assignedTo: "",
   status: "Planning",
@@ -58,6 +76,21 @@ const EMPTY_FORM = {
   description: "",
 };
 
+// ======================================
+// Helpers
+// ======================================
+
+const getId = (value) => {
+  if (typeof value === "string") return value;
+
+  return value?._id || value?.id || "";
+};
+
+const getErrorMessage = (error) =>
+  error instanceof Error
+    ? error.message
+    : "Something went wrong.";
+
 const currency = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -65,7 +98,8 @@ const currency = (value) =>
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
 
-const pad = (value) => String(value).padStart(2, "0");
+const pad = (value) =>
+  String(value).padStart(2, "0");
 
 function todayKey() {
   const date = new Date();
@@ -75,29 +109,44 @@ function todayKey() {
   )}-${pad(date.getDate())}`;
 }
 
-function formatDate(value) {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return "Not set";
-  }
+function dateKey(value) {
+  if (!value) return "";
 
-  const date = new Date(`${value}T12:00:00`);
+  const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return "Not set";
+    return "";
   }
+
+  return date.toISOString().slice(0, 10);
+}
+
+function toISO(value) {
+  return value
+    ? `${value}T00:00:00.000Z`
+    : null;
+}
+
+function formatDate(value) {
+  const key = dateKey(value);
+
+  if (!key) return "Not set";
 
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).format(date);
+    timeZone: "UTC",
+  }).format(new Date(`${key}T00:00:00.000Z`));
 }
 
 function isOverdue(project, today) {
   return (
-    project.deadline &&
+    Boolean(project.deadline) &&
     project.deadline < today &&
-    !["Completed", "Cancelled"].includes(project.status)
+    !["Completed", "Cancelled"].includes(
+      project.status
+    )
   );
 }
 
@@ -108,33 +157,137 @@ function statusClass(value) {
     .replace(/^-|-$/g, "");
 }
 
-function readProjects() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+function mapProject(project) {
+  const client =
+    typeof project.client === "object"
+      ? project.client
+      : null;
 
-    if (!raw) return [];
+  const assigned = Array.isArray(project.assignedTo)
+    ? project.assignedTo
+    : [];
 
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (project) =>
-            project &&
-            typeof project === "object" &&
-            typeof project.id === "string"
-        )
-      : [];
-  } catch {
-    return [];
-  }
+  return {
+    id: getId(project),
+    name: project.name || "",
+    client: getId(project.client),
+    clientName: client?.name || "Unknown Client",
+    business: client?.company || "",
+    service: project.type || "Other",
+    assignedIds: assigned.map(getId),
+    assignedTo: assigned
+      .map((user) =>
+        typeof user === "object"
+          ? user.name
+          : ""
+      )
+      .filter(Boolean)
+      .join(", "),
+    status: project.status || "Planning",
+    priority: project.priority || "Medium",
+    progress: project.progress ?? 0,
+    budget: project.budget ?? 0,
+    startDate: dateKey(project.startDate),
+    deadline: dateKey(project.deadline),
+    description: project.description || "",
+    notes: project.notes || "",
+    projectManager: getId(project.projectManager),
+    repositoryUrl: project.repositoryUrl || "",
+    liveUrl: project.liveUrl || "",
+    milestones: project.milestones || [],
+  };
 }
 
-function ProjectModal({ project, onClose, onSave }) {
+// ======================================
+// Read Client Directory
+// ======================================
+
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
+).replace(/\/+$/, "");
+
+async function getClients() {
+  const clients = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const response = await fetch(
+      `${API_URL}/clients?page=${page}&limit=${PAGE_SIZE}`,
+      {
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+        },
+      }
+    );
+
+    const result = await response
+      .json()
+      .catch(() => null);
+
+    if (!response.ok || result?.success !== true) {
+      throw new Error(
+        result?.message ||
+          "Unable to load clients."
+      );
+    }
+
+    clients.push(...(result.clients || []));
+
+    totalPages =
+      result.pagination?.totalPages || 1;
+
+    page += 1;
+  } while (page <= totalPages);
+
+  return clients;
+}
+
+async function getAssignableUsers() {
+  const users = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const result = await employeeApi.getUsers({
+      page,
+      limit: PAGE_SIZE,
+      isActive: "true",
+    });
+
+    users.push(...(result.users || []));
+
+    totalPages =
+      result.pagination?.totalPages || 1;
+
+    page += 1;
+  } while (page <= totalPages);
+
+  return users;
+}
+
+// ======================================
+// Project Modal
+// ======================================
+
+function ProjectModal({
+  project,
+  clients,
+  users,
+  onClose,
+  onSave,
+}) {
+  const isEditing = Boolean(project);
+
   const [form, setForm] = useState(() =>
     project
       ? {
           ...EMPTY_FORM,
           ...project,
+          assignedTo:
+            project.assignedIds?.[0] || "",
           progress: String(project.progress ?? 0),
           budget: String(project.budget ?? ""),
         }
@@ -145,13 +298,19 @@ function ProjectModal({ project, onClose, onSave }) {
   );
 
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const handleEscape = (event) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !saving) {
+        onClose();
+      }
     };
 
-    document.addEventListener("keydown", handleEscape);
+    document.addEventListener(
+      "keydown",
+      handleEscape
+    );
 
     return () => {
       document.removeEventListener(
@@ -159,7 +318,7 @@ function ProjectModal({ project, onClose, onSave }) {
         handleEscape
       );
     };
-  }, [onClose]);
+  }, [onClose, saving]);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -172,17 +331,22 @@ function ProjectModal({ project, onClose, onSave }) {
     setError("");
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
 
-    const name = form.name.trim();
-    const clientName = form.clientName.trim();
-    const assignedTo = form.assignedTo.trim();
+    if (saving) return;
 
-    if (!name || !clientName) {
+    const name = form.name.trim();
+
+    if (name.length < 3) {
       setError(
-        "Project name and client name are required."
+        "Project name must contain at least 3 characters."
       );
+      return;
+    }
+
+    if (!form.client) {
+      setError("Please select a client.");
       return;
     }
 
@@ -203,7 +367,7 @@ function ProjectModal({ project, onClose, onSave }) {
     if (
       !Number.isFinite(budget) ||
       budget < 0 ||
-      budget > 1000000000
+      budget > 999999999999
     ) {
       setError("Enter a valid project budget.");
       return;
@@ -215,46 +379,87 @@ function ProjectModal({ project, onClose, onSave }) {
       form.deadline < form.startDate
     ) {
       setError(
-        "Deadline cannot be earlier than the start date."
+        "Deadline cannot be earlier than start date."
       );
       return;
     }
 
-    if (form.status === "Completed" && progress !== 100) {
+    if (
+      form.status === "Completed" &&
+      progress !== 100
+    ) {
       setError(
         "Completed projects must have 100% progress."
       );
       return;
     }
 
-    if (progress === 100 && form.status !== "Completed") {
+    if (
+      progress === 100 &&
+      form.status !== "Completed"
+    ) {
       setError(
         "Set status to Completed when progress reaches 100%."
       );
       return;
     }
 
-    onSave({
+    const assignedIds = form.assignedTo
+      ? [form.assignedTo]
+      : [];
+
+    // Preserve additional assignments when editing.
+    // The existing UI exposes only one assignment field.
+    const previousIds =
+      project?.assignedIds || [];
+
+    const additionalIds = previousIds.filter(
+      (id) =>
+        id !== form.assignedTo &&
+        id !== previousIds[0]
+    );
+
+    const payload = {
       name,
-      clientName,
-      business: form.business.trim(),
-      service: form.service,
-      assignedTo,
-      status: form.status,
+      client: form.client,
+      type: form.service,
       priority: form.priority,
+      assignedTo: [
+        ...new Set([
+          ...assignedIds,
+          ...additionalIds,
+        ]),
+      ],
       progress,
       budget,
-      startDate: form.startDate,
-      deadline: form.deadline,
+      startDate: toISO(form.startDate),
+      deadline: toISO(form.deadline),
       description: form.description.trim(),
-    });
+    };
+
+    try {
+      setSaving(true);
+      setError("");
+
+      await onSave({
+        payload,
+        status: form.status,
+      });
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div
       className="projects__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (
+          event.target === event.currentTarget &&
+          !saving
+        ) {
           onClose();
         }
       }}
@@ -268,7 +473,9 @@ function ProjectModal({ project, onClose, onSave }) {
         <div className="projects__modal-header">
           <div>
             <h2 id="project-modal-title">
-              {project ? "Edit Project" : "Create New Project"}
+              {isEditing
+                ? "Edit Project"
+                : "Create New Project"}
             </h2>
 
             <p>
@@ -280,6 +487,7 @@ function ProjectModal({ project, onClose, onSave }) {
             type="button"
             className="projects__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close project form"
           >
             <X size={20} />
@@ -298,31 +506,45 @@ function ProjectModal({ project, onClose, onSave }) {
                 value={form.name}
                 onChange={handleChange}
                 placeholder="Restaurant Website Development"
-                maxLength={150}
+                maxLength={200}
                 required
               />
             </label>
 
             <label>
               Client Name *
-              <input
-                name="clientName"
-                value={form.clientName}
+              <select
+                name="client"
+                value={form.client}
                 onChange={handleChange}
-                placeholder="Client full name"
-                maxLength={100}
                 required
-              />
+              >
+                <option value="">
+                  Select Client
+                </option>
+
+                {clients.map((client) => (
+                  <option
+                    key={getId(client)}
+                    value={getId(client)}
+                  >
+                    {client.name}
+                  </option>
+                ))}
+              </select>
             </label>
 
             <label>
               Business / Company
               <input
-                name="business"
-                value={form.business}
-                onChange={handleChange}
+                value={
+                  clients.find(
+                    (client) =>
+                      getId(client) === form.client
+                  )?.company || ""
+                }
                 placeholder="Business name"
-                maxLength={120}
+                readOnly
               />
             </label>
 
@@ -334,7 +556,10 @@ function ProjectModal({ project, onClose, onSave }) {
                 onChange={handleChange}
               >
                 {SERVICES.map((service) => (
-                  <option key={service} value={service}>
+                  <option
+                    key={service}
+                    value={service}
+                  >
                     {service}
                   </option>
                 ))}
@@ -343,13 +568,30 @@ function ProjectModal({ project, onClose, onSave }) {
 
             <label>
               Assigned Employee
-              <input
+              <select
                 name="assignedTo"
                 value={form.assignedTo}
                 onChange={handleChange}
-                placeholder="Employee name"
-                maxLength={100}
-              />
+              >
+                <option value="">
+                  Unassigned
+                </option>
+
+                {users
+                  .filter(
+                    (user) =>
+                      user.role === "employee" ||
+                      user.role === "manager"
+                  )
+                  .map((user) => (
+                    <option
+                      key={getId(user)}
+                      value={getId(user)}
+                    >
+                      {user.name}
+                    </option>
+                  ))}
+              </select>
             </label>
 
             <label>
@@ -358,9 +600,13 @@ function ProjectModal({ project, onClose, onSave }) {
                 name="status"
                 value={form.status}
                 onChange={handleChange}
+                disabled={!isEditing}
               >
                 {STATUSES.map((status) => (
-                  <option key={status} value={status}>
+                  <option
+                    key={status}
+                    value={status}
+                  >
                     {status}
                   </option>
                 ))}
@@ -375,7 +621,10 @@ function ProjectModal({ project, onClose, onSave }) {
                 onChange={handleChange}
               >
                 {PRIORITIES.map((priority) => (
-                  <option key={priority} value={priority}>
+                  <option
+                    key={priority}
+                    value={priority}
+                  >
                     {priority}
                   </option>
                 ))}
@@ -402,7 +651,7 @@ function ProjectModal({ project, onClose, onSave }) {
                 name="budget"
                 type="number"
                 min="0"
-                max="1000000000"
+                max="999999999999"
                 step="1"
                 value={form.budget}
                 onChange={handleChange}
@@ -438,13 +687,26 @@ function ProjectModal({ project, onClose, onSave }) {
                 onChange={handleChange}
                 placeholder="Scope, requirements, deliverables and milestones..."
                 rows={4}
-                maxLength={3000}
+                maxLength={5000}
               />
             </label>
           </div>
 
+          {clients.length === 0 && (
+            <p
+              className="projects__form-error"
+              role="status"
+            >
+              No clients found. Create a client
+              before creating a project.
+            </p>
+          )}
+
           {error && (
-            <p className="projects__form-error" role="alert">
+            <p
+              className="projects__form-error"
+              role="alert"
+            >
               {error}
             </p>
           )}
@@ -454,6 +716,7 @@ function ProjectModal({ project, onClose, onSave }) {
               type="button"
               className="projects__button projects__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -461,8 +724,16 @@ function ProjectModal({ project, onClose, onSave }) {
             <button
               type="submit"
               className="projects__button projects__button--primary"
+              disabled={
+                saving ||
+                clients.length === 0
+              }
             >
-              {project ? "Save Changes" : "Create Project"}
+              {saving
+                ? "Saving..."
+                : isEditing
+                  ? "Save Changes"
+                  : "Create Project"}
             </button>
           </div>
         </form>
@@ -471,67 +742,325 @@ function ProjectModal({ project, onClose, onSave }) {
   );
 }
 
+// ======================================
+// Projects Page
+// ======================================
+
 export default function Projects() {
-  const [projects, setProjects] = useState(readProjects);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All");
-  const [priorityFilter, setPriorityFilter] = useState("All");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingProject, setEditingProject] = useState(null);
-  const [storageError, setStorageError] = useState("");
-  const [today, setToday] = useState(todayKey);
+  const [projects, setProjects] =
+    useState([]);
+
+  const [clients, setClients] =
+    useState([]);
+
+  const [users, setUsers] =
+    useState([]);
+
+  const [search, setSearch] =
+    useState("");
+
+  const [statusFilter, setStatusFilter] =
+    useState("All");
+
+  const [priorityFilter, setPriorityFilter] =
+    useState("All");
+
+  const [modalOpen, setModalOpen] =
+    useState(false);
+
+  const [editingProject, setEditingProject] =
+    useState(null);
+
+  const [storageError, setStorageError] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [busy, setBusy] =
+    useState(false);
+
+  const [today, setToday] =
+    useState(todayKey);
+
+  const [refreshKey, setRefreshKey] =
+    useState(0);
+
+  const refreshProjects = useCallback(() => {
+    setRefreshKey((value) => value + 1);
+  }, []);
+
+  // ====================================
+  // Load Projects from MongoDB
+  // ====================================
 
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(projects)
-      );
+    let cancelled = false;
 
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save projects in browser storage."
-      );
-    }
-  }, [projects]);
+    const loadProjects = async () => {
+      try {
+        setLoading(true);
+        setStorageError("");
+
+        const allProjects = [];
+        let page = 1;
+        let totalPages = 1;
+
+        do {
+          const result = await projectApi.getAll({
+            page,
+            limit: PAGE_SIZE,
+          });
+
+          if (cancelled) return;
+
+          allProjects.push(
+            ...(result.projects || [])
+          );
+
+          totalPages =
+            result.pagination?.totalPages || 1;
+
+          page += 1;
+        } while (page <= totalPages);
+
+        if (!cancelled) {
+          setProjects(
+            allProjects.map(mapProject)
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setStorageError(
+            getErrorMessage(err)
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadProjects();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  // ====================================
+  // Update Today
+  // ====================================
 
   useEffect(() => {
-    const refresh = () => setToday(todayKey());
+    const refresh = () =>
+      setToday(todayKey());
 
-    const interval = window.setInterval(refresh, 60_000);
-    window.addEventListener("focus", refresh);
+    const interval = window.setInterval(
+      refresh,
+      60_000
+    );
+
+    window.addEventListener(
+      "focus",
+      refresh
+    );
 
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener(
+        "focus",
+        refresh
+      );
     };
   }, []);
+
+  // ====================================
+  // Load Form Dependencies
+  // ====================================
+
+  const loadFormData = async () => {
+    const [clientData, userData] =
+      await Promise.all([
+        getClients(),
+        getAssignableUsers(),
+      ]);
+
+    setClients(clientData);
+    setUsers(userData);
+  };
+
+  const openAdd = async () => {
+    if (busy) return;
+
+    try {
+      setBusy(true);
+      setStorageError("");
+
+      await loadFormData();
+
+      setEditingProject(null);
+      setModalOpen(true);
+    } catch (err) {
+      setStorageError(
+        getErrorMessage(err)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openEdit = async (project) => {
+    if (busy) return;
+
+    try {
+      setBusy(true);
+      setStorageError("");
+
+      await loadFormData();
+
+      setEditingProject(project);
+      setModalOpen(true);
+    } catch (err) {
+      setStorageError(
+        getErrorMessage(err)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const closeModal = () => {
+    if (busy) return;
+
+    setModalOpen(false);
+    setEditingProject(null);
+  };
+
+  // ====================================
+  // Create / Update Project
+  // ====================================
+
+  const saveProject = async ({
+    payload,
+    status,
+  }) => {
+    setBusy(true);
+
+    try {
+      if (editingProject) {
+        const id = editingProject.id;
+
+        await projectApi.update(
+          id,
+          payload
+        );
+
+        if (
+          status !== editingProject.status
+        ) {
+          await projectApi.updateStatus(
+            id,
+            status
+          );
+        }
+      } else {
+        await projectApi.create({
+          ...payload,
+          projectManager: null,
+          milestones: [],
+          repositoryUrl: "",
+          liveUrl: "",
+          notes: "",
+        });
+      }
+
+      setModalOpen(false);
+      setEditingProject(null);
+      refreshProjects();
+    } catch (err) {
+      refreshProjects();
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ====================================
+  // Delete Project
+  // ====================================
+
+  const deleteProject = async (project) => {
+    if (
+      !window.confirm(
+        `Delete project "${project.name}"? This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setStorageError("");
+
+      await projectApi.remove(project.id);
+
+      refreshProjects();
+    } catch (err) {
+      setStorageError(
+        getErrorMessage(err)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ====================================
+  // Statistics
+  // ====================================
 
   const stats = useMemo(() => {
     return {
       total: projects.length,
+
       active: projects.filter(
-        (project) => project.status === "In Progress"
+        (project) =>
+          project.status === "In Progress"
       ).length,
+
       completed: projects.filter(
-        (project) => project.status === "Completed"
+        (project) =>
+          project.status === "Completed"
       ).length,
-      overdue: projects.filter((project) =>
-        isOverdue(project, today)
+
+      overdue: projects.filter(
+        (project) =>
+          isOverdue(project, today)
       ).length,
+
       budget: projects
-        .filter((project) => project.status !== "Cancelled")
+        .filter(
+          (project) =>
+            project.status !== "Cancelled"
+        )
         .reduce(
           (sum, project) =>
-            sum + (Number(project.budget) || 0),
+            sum +
+            (Number(project.budget) || 0),
           0
         ),
     };
   }, [projects, today]);
 
+  // ====================================
+  // Search and Filters
+  // ====================================
+
   const filteredProjects = useMemo(() => {
-    const query = search.trim().toLowerCase();
+    const query = search
+      .trim()
+      .toLowerCase();
 
     return projects
       .filter((project) => {
@@ -564,69 +1093,27 @@ export default function Projects() {
           return aOverdue ? -1 : 1;
         }
 
-        const aDeadline = a.deadline || "9999-12-31";
-        const bDeadline = b.deadline || "9999-12-31";
+        const aDeadline =
+          a.deadline || "9999-12-31";
 
-        return aDeadline.localeCompare(bDeadline);
+        const bDeadline =
+          b.deadline || "9999-12-31";
+
+        return aDeadline.localeCompare(
+          bDeadline
+        );
       });
-  }, [projects, search, statusFilter, priorityFilter, today]);
+  }, [
+    projects,
+    search,
+    statusFilter,
+    priorityFilter,
+    today,
+  ]);
 
-  const openAdd = () => {
-    setEditingProject(null);
-    setModalOpen(true);
-  };
-
-  const openEdit = (project) => {
-    setEditingProject(project);
-    setModalOpen(true);
-  };
-
-  const closeModal = () => {
-    setModalOpen(false);
-    setEditingProject(null);
-  };
-
-  const saveProject = (form) => {
-    const timestamp = new Date().toISOString();
-
-    if (editingProject) {
-      setProjects((previous) =>
-        previous.map((project) =>
-          project.id === editingProject.id
-            ? {
-                ...project,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : project
-        )
-      );
-    } else {
-      setProjects((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
-    }
-
-    closeModal();
-  };
-
-  const deleteProject = (project) => {
-    const confirmed = window.confirm(
-      `Delete project "${project.name}"? This action cannot be undone.`
-    );
-
-    if (!confirmed) return;
-
-    setProjects((previous) =>
-      previous.filter((item) => item.id !== project.id)
-    );
-  };
+  // ====================================
+  // Dashboard Cards
+  // ====================================
 
   const cards = [
     {
@@ -656,10 +1143,12 @@ export default function Projects() {
     },
   ];
 
+  // ====================================
+  // Existing UI
+  // ====================================
+
   return (
     <div className="projects">
-      {/* HEADER */}
-
       <div className="projects__header">
         <div>
           <span className="projects__eyebrow">
@@ -669,15 +1158,18 @@ export default function Projects() {
           <h1>Project Management</h1>
 
           <p>
-            Monitor project delivery, ownership, deadlines
-            and budgets.
+            Monitor project delivery,
+            ownership, deadlines and budgets.
           </p>
         </div>
 
         <button
           type="button"
           className="projects__button projects__button--primary"
-          onClick={openAdd}
+          onClick={() => {
+            void openAdd();
+          }}
+          disabled={busy}
         >
           <Plus size={18} />
           New Project
@@ -685,24 +1177,28 @@ export default function Projects() {
       </div>
 
       {storageError && (
-        <div className="projects__error" role="alert">
+        <div
+          className="projects__error"
+          role="alert"
+        >
           {storageError}
         </div>
       )}
 
-      {/* STATS */}
-
       <div className="projects__stats">
-        {cards.map(({ label, value, icon: Icon }) => (
-          <div className="projects__stat" key={label}>
-            <Icon size={21} />
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+        {cards.map(
+          ({ label, value, icon: Icon }) => (
+            <div
+              className="projects__stat"
+              key={label}
+            >
+              <Icon size={21} />
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          )
+        )}
       </div>
-
-      {/* PROJECT LIST */}
 
       <section className="projects__panel">
         <div className="projects__panel-heading">
@@ -713,7 +1209,8 @@ export default function Projects() {
             </h2>
 
             <p>
-              Manage active and completed project work.
+              Manage active and completed
+              project work.
             </p>
           </div>
         </div>
@@ -739,14 +1236,21 @@ export default function Projects() {
             <select
               value={statusFilter}
               onChange={(event) =>
-                setStatusFilter(event.target.value)
+                setStatusFilter(
+                  event.target.value
+                )
               }
               aria-label="Filter by project status"
             >
-              <option value="All">All Statuses</option>
+              <option value="All">
+                All Statuses
+              </option>
 
               {STATUSES.map((status) => (
-                <option key={status} value={status}>
+                <option
+                  key={status}
+                  value={status}
+                >
                   {status}
                 </option>
               ))}
@@ -755,14 +1259,21 @@ export default function Projects() {
             <select
               value={priorityFilter}
               onChange={(event) =>
-                setPriorityFilter(event.target.value)
+                setPriorityFilter(
+                  event.target.value
+                )
               }
               aria-label="Filter by priority"
             >
-              <option value="All">All Priorities</option>
+              <option value="All">
+                All Priorities
+              </option>
 
               {PRIORITIES.map((priority) => (
-                <option key={priority} value={priority}>
+                <option
+                  key={priority}
+                  value={priority}
+                >
                   {priority}
                 </option>
               ))}
@@ -787,165 +1298,231 @@ export default function Projects() {
             </thead>
 
             <tbody>
-              {filteredProjects.map((project) => {
-                const overdue = isOverdue(project, today);
-                const progress = Math.min(
-                  100,
-                  Math.max(0, Number(project.progress) || 0)
-                );
+              {filteredProjects.map(
+                (project) => {
+                  const overdue = isOverdue(
+                    project,
+                    today
+                  );
 
-                return (
-                  <tr key={project.id}>
-                    <td>
-                      <div className="projects__identity">
-                        <span className="projects__avatar">
-                          <FolderKanban size={18} />
+                  const progress = Math.min(
+                    100,
+                    Math.max(
+                      0,
+                      Number(project.progress) || 0
+                    )
+                  );
+
+                  return (
+                    <tr key={project.id}>
+                      <td>
+                        <div className="projects__identity">
+                          <span className="projects__avatar">
+                            <FolderKanban
+                              size={18}
+                            />
+                          </span>
+
+                          <div>
+                            <strong>
+                              {project.name}
+                            </strong>
+
+                            <small>
+                              {project.service}
+                            </small>
+                          </div>
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="projects__client">
+                          <strong>
+                            {project.clientName}
+                          </strong>
+
+                          {project.business && (
+                            <small>
+                              <Building2
+                                size={12}
+                              />
+                              {
+                                project.business
+                              }
+                            </small>
+                          )}
+                        </div>
+                      </td>
+
+                      <td>
+                        <span className="projects__employee">
+                          <UserRound
+                            size={14}
+                          />
+
+                          {project.assignedTo ||
+                            "Unassigned"}
+                        </span>
+                      </td>
+
+                      <td>
+                        <span
+                          className={`projects__badge projects__badge--${statusClass(
+                            project.status
+                          )}`}
+                        >
+                          {project.status}
+                        </span>
+                      </td>
+
+                      <td>
+                        <span
+                          className={`projects__priority projects__priority--${String(
+                            project.priority
+                          ).toLowerCase()}`}
+                        >
+                          {project.priority}
+                        </span>
+                      </td>
+
+                      <td>
+                        <div className="projects__progress">
+                          <div className="projects__progress-heading">
+                            <span>
+                              {progress}%
+                            </span>
+                          </div>
+
+                          <div
+                            className="projects__progress-track"
+                            role="progressbar"
+                            aria-label={`${project.name} progress`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={progress}
+                          >
+                            <span
+                              style={{
+                                width: `${progress}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </td>
+
+                      <td>
+                        <span
+                          className={`projects__date ${
+                            overdue
+                              ? "projects__date--overdue"
+                              : ""
+                          }`}
+                        >
+                          {overdue ? (
+                            <Clock3 size={14} />
+                          ) : (
+                            <CalendarDays
+                              size={14}
+                            />
+                          )}
+
+                          {formatDate(
+                            project.deadline
+                          )}
                         </span>
 
-                        <div>
-                          <strong>{project.name}</strong>
-                          <small>{project.service}</small>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td>
-                      <div className="projects__client">
-                        <strong>{project.clientName}</strong>
-
-                        {project.business && (
-                          <small>
-                            <Building2 size={12} />
-                            {project.business}
+                        {overdue && (
+                          <small className="projects__overdue">
+                            Overdue
                           </small>
                         )}
-                      </div>
-                    </td>
+                      </td>
 
-                    <td>
-                      <span className="projects__employee">
-                        <UserRound size={14} />
-                        {project.assignedTo || "Unassigned"}
-                      </span>
-                    </td>
-
-                    <td>
-                      <span
-                        className={`projects__badge projects__badge--${statusClass(
-                          project.status
-                        )}`}
-                      >
-                        {project.status}
-                      </span>
-                    </td>
-
-                    <td>
-                      <span
-                        className={`projects__priority projects__priority--${String(
-                          project.priority
-                        ).toLowerCase()}`}
-                      >
-                        {project.priority}
-                      </span>
-                    </td>
-
-                    <td>
-                      <div className="projects__progress">
-                        <div className="projects__progress-heading">
-                          <span>{progress}%</span>
-                        </div>
-
-                        <div
-                          className="projects__progress-track"
-                          role="progressbar"
-                          aria-label={`${project.name} progress`}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-valuenow={progress}
-                        >
-                          <span
-                            style={{ width: `${progress}%` }}
-                          />
-                        </div>
-                      </div>
-                    </td>
-
-                    <td>
-                      <span
-                        className={`projects__date ${
-                          overdue ? "projects__date--overdue" : ""
-                        }`}
-                      >
-                        {overdue ? (
-                          <Clock3 size={14} />
-                        ) : (
-                          <CalendarDays size={14} />
+                      <td className="projects__amount">
+                        {currency(
+                          project.budget
                         )}
+                      </td>
 
-                        {formatDate(project.deadline)}
-                      </span>
+                      <td>
+                        <div className="projects__actions">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void openEdit(
+                                project
+                              );
+                            }}
+                            title="Edit project"
+                            aria-label={`Edit ${project.name}`}
+                            disabled={busy}
+                          >
+                            <Pencil
+                              size={16}
+                            />
+                          </button>
 
-                      {overdue && (
-                        <small className="projects__overdue">
-                          Overdue
-                        </small>
-                      )}
-                    </td>
-
-                    <td className="projects__amount">
-                      {currency(project.budget)}
-                    </td>
-
-                    <td>
-                      <div className="projects__actions">
-                        <button
-                          type="button"
-                          onClick={() => openEdit(project)}
-                          title="Edit project"
-                          aria-label={`Edit ${project.name}`}
-                        >
-                          <Pencil size={16} />
-                        </button>
-
-                        <button
-                          type="button"
-                          className="projects__delete"
-                          onClick={() => deleteProject(project)}
-                          title="Delete project"
-                          aria-label={`Delete ${project.name}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                          <button
+                            type="button"
+                            className="projects__delete"
+                            onClick={() => {
+                              void deleteProject(
+                                project
+                              );
+                            }}
+                            title="Delete project"
+                            aria-label={`Delete ${project.name}`}
+                            disabled={busy}
+                          >
+                            <Trash2
+                              size={16}
+                            />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                }
+              )}
 
               {filteredProjects.length === 0 && (
                 <tr>
                   <td colSpan={9}>
                     <div className="projects__empty">
-                      <FolderKanban size={36} />
+                      <FolderKanban
+                        size={36}
+                      />
 
-                      <h3>No projects found</h3>
+                      <h3>
+                        {loading
+                          ? "Loading projects..."
+                          : "No projects found"}
+                      </h3>
 
                       <p>
-                        {projects.length === 0
-                          ? "Create your first project to get started."
-                          : "Try adjusting your search or filters."}
+                        {loading
+                          ? "Fetching projects from the backend."
+                          : projects.length === 0
+                            ? "Create your first project to get started."
+                            : "Try adjusting your search or filters."}
                       </p>
 
-                      {projects.length === 0 && (
-                        <button
-                          type="button"
-                          className="projects__button projects__button--primary"
-                          onClick={openAdd}
-                        >
-                          <Plus size={16} />
-                          Create Project
-                        </button>
-                      )}
+                      {!loading &&
+                        projects.length === 0 && (
+                          <button
+                            type="button"
+                            className="projects__button projects__button--primary"
+                            onClick={() => {
+                              void openAdd();
+                            }}
+                            disabled={busy}
+                          >
+                            <Plus
+                              size={16}
+                            />
+                            Create Project
+                          </button>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -955,7 +1532,8 @@ export default function Projects() {
         </div>
 
         <div className="projects__table-footer">
-          Showing {filteredProjects.length} of{" "}
+          Showing{" "}
+          {filteredProjects.length} of{" "}
           {projects.length} projects
         </div>
       </section>
@@ -963,6 +1541,8 @@ export default function Projects() {
       {modalOpen && (
         <ProjectModal
           project={editingProject}
+          clients={clients}
+          users={users}
           onClose={closeModal}
           onSave={saveProject}
         />

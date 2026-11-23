@@ -48,6 +48,23 @@ const app = express();
 app.disable("x-powered-by");
 
 // ======================================
+// Production Reverse Proxy
+// ======================================
+
+// Render generally places Express behind
+// a reverse proxy.
+//
+// Trust exactly one proxy hop when this
+// matches the deployment topology.
+//
+// Required for correct client IP handling
+// with express-rate-limit.
+
+if (process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1);
+}
+
+// ======================================
 // Security Headers
 // ======================================
 
