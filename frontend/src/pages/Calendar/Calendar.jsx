@@ -1,5 +1,11 @@
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import {
   CalendarDays,
   ChevronLeft,
@@ -18,16 +24,32 @@ import {
   MapPin,
   CalendarClock,
 } from "lucide-react";
+
+import { calendarApi } from "../../services/calendarApi.js";
 import "./Calendar.scss";
 
 const API_URL = (
-  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
 ).replace(/\/+$/, "");
 
-const EVENTS_KEY = "webro-management-calendar-v1";
+const WEEKDAYS = [
+  "Sun",
+  "Mon",
+  "Tue",
+  "Wed",
+  "Thu",
+  "Fri",
+  "Sat",
+];
 
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const EVENT_TYPES = ["Meeting", "Reminder", "Call", "Deadline", "Other"];
+const EVENT_TYPES = [
+  "Meeting",
+  "Reminder",
+  "Call",
+  "Deadline",
+  "Other",
+];
 
 const EMPTY_FORM = {
   title: "",
@@ -38,14 +60,16 @@ const EMPTY_FORM = {
   location: "",
 };
 
-const pad = (value) => String(value).padStart(2, "0");
+const pad = (value) =>
+  String(value).padStart(2, "0");
 
 const toDateKey = (date) =>
-  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-    date.getDate()
-  )}`;
+  `${date.getFullYear()}-${pad(
+    date.getMonth() + 1
+  )}-${pad(date.getDate())}`;
 
-const todayKey = () => toDateKey(new Date());
+const todayKey = () =>
+  toDateKey(new Date());
 
 const parseDate = (value) => {
   if (
@@ -55,8 +79,15 @@ const parseDate = (value) => {
     return null;
   }
 
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
+  const [year, month, day] = value
+    .split("-")
+    .map(Number);
+
+  const date = new Date(
+    year,
+    month - 1,
+    day
+  );
 
   return date.getFullYear() === year &&
     date.getMonth() === month - 1 &&
@@ -67,12 +98,27 @@ const parseDate = (value) => {
 
 const normalizeDate = (value) => {
   if (!value) return "";
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : toDateKey(date);
+
+  if (
+    typeof value === "string" &&
+    parseDate(value)
+  ) {
+    return value;
+  }
+
+  const date =
+    value instanceof Date
+      ? value
+      : new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? ""
+    : toDateKey(date);
 };
 
 const formatDate = (value) => {
   const date = parseDate(value);
+
   return date
     ? new Intl.DateTimeFormat("en-IN", {
         day: "2-digit",
@@ -91,47 +137,65 @@ const formatMonth = (date) =>
 const formatTime = (time) => {
   if (!time) return "All day";
 
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+  const match =
+    /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+
   if (!match) return "All day";
 
   return new Intl.DateTimeFormat("en-IN", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
-  }).format(new Date(2026, 0, 1, Number(match[1]), Number(match[2])));
+  }).format(
+    new Date(
+      2026,
+      0,
+      1,
+      Number(match[1]),
+      Number(match[2])
+    )
+  );
 };
 
 const idOf = (value) =>
-  typeof value === "string" ? value : value?._id || value?.id || "";
+  typeof value === "string"
+    ? value
+    : value?._id || value?.id || "";
 
-function readEvents() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (event) =>
-            typeof event?.id === "string" &&
-            typeof event.title === "string" &&
-            Boolean(parseDate(event.date))
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
+const getErrorMessage = (error) =>
+  error instanceof Error
+    ? error.message
+    : "An unexpected error occurred.";
+
+const normalizeManualEvent = (event) => ({
+  ...event,
+  id: idOf(event),
+  source: "manual",
+});
 
 async function api(path, signal) {
-  const response = await fetch(`${API_URL}${path}`, {
-    credentials: "include",
-    headers: { Accept: "application/json" },
-    signal,
-  });
+  const response = await fetch(
+    `${API_URL}${path}`,
+    {
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+      },
+      signal,
+    }
+  );
 
-  const result = await response.json().catch(() => null);
+  const result = await response
+    .json()
+    .catch(() => null);
 
-  if (!response.ok || result?.success !== true) {
+  if (
+    !response.ok ||
+    result?.success !== true
+  ) {
     throw new Error(
-      result?.message || `Unable to fetch calendar data (${response.status})`
+      result?.message ||
+        `Unable to fetch calendar data (${response.status})`
     );
   }
 
@@ -144,32 +208,47 @@ async function fetchAll(path, key, signal) {
   let totalPages = 1;
 
   do {
-    const separator = path.includes("?") ? "&" : "?";
+    const separator = path.includes("?")
+      ? "&"
+      : "?";
+
     const result = await api(
       `${path}${separator}page=${page}&limit=100`,
       signal
     );
 
     if (!Array.isArray(result[key])) {
-      throw new Error(`Unexpected ${key} response.`);
+      throw new Error(
+        `Unexpected ${key} response.`
+      );
     }
 
     records.push(...result[key]);
-    totalPages = result.pagination?.totalPages ?? 1;
+
+    totalPages =
+      result.pagination?.totalPages ?? 1;
+
     page += 1;
   } while (page <= totalPages);
 
   return records;
 }
 
-function buildIntegratedEvents(tasks, followUps, projects) {
+function buildIntegratedEvents(
+  tasks,
+  followUps,
+  projects
+) {
   const taskEvents = tasks
     .filter(
       (task) =>
         idOf(task) &&
         task.title &&
         normalizeDate(task.dueDate) &&
-        !["Completed", "Cancelled"].includes(task.status)
+        ![
+          "Completed",
+          "Cancelled",
+        ].includes(task.status)
     )
     .map((task) => ({
       id: `task-${idOf(task)}`,
@@ -188,23 +267,30 @@ function buildIntegratedEvents(tasks, followUps, projects) {
       (item) =>
         idOf(item) &&
         item.scheduledAt &&
-        !["Completed", "Cancelled"].includes(item.status)
+        ![
+          "Completed",
+          "Cancelled",
+        ].includes(item.status)
     )
     .map((item) => {
-      const scheduled = new Date(item.scheduledAt);
-      const localTime = `${pad(scheduled.getHours())}:${pad(
-        scheduled.getMinutes()
-      )}`;
+      const scheduled = new Date(
+        item.scheduledAt
+      );
 
       return {
         id: `followup-${idOf(item)}`,
         title: item.title || "Follow-up",
         date: toDateKey(scheduled),
-        time: localTime,
+        time: `${pad(
+          scheduled.getHours()
+        )}:${pad(scheduled.getMinutes())}`,
         type: "Follow-up",
         source: "followup",
         description: item.description || "",
-        subtitle: item.lead?.name || item.client?.name || "",
+        subtitle:
+          item.lead?.name ||
+          item.client?.name ||
+          "",
         status: item.status,
       };
     });
@@ -214,67 +300,120 @@ function buildIntegratedEvents(tasks, followUps, projects) {
       (project) =>
         idOf(project) &&
         normalizeDate(project.deadline) &&
-        !["Completed", "Cancelled"].includes(project.status)
+        ![
+          "Completed",
+          "Cancelled",
+        ].includes(project.status)
     )
     .map((project) => ({
       id: `project-${idOf(project)}`,
-      title: `${project.name || "Project"} deadline`,
-      date: normalizeDate(project.deadline),
+      title: `${
+        project.name || "Project"
+      } deadline`,
+      date: normalizeDate(
+        project.deadline
+      ),
       time: "",
       type: "Project",
       source: "project",
       description: "",
-      subtitle: project.client?.name || "",
+      subtitle:
+        project.client?.name || "",
       status: project.status,
     }));
 
-  return [...taskEvents, ...followUpEvents, ...projectEvents];
+  return [
+    ...taskEvents,
+    ...followUpEvents,
+    ...projectEvents,
+  ];
 }
 
-function EventModal({ event, initialDate, onClose, onSave }) {
+// ======================================
+// Event Modal
+// ======================================
+
+function EventModal({
+  event,
+  initialDate,
+  onClose,
+  onSave,
+  saving,
+  serverError,
+}) {
   const [form, setForm] = useState(() =>
     event
-      ? { ...EMPTY_FORM, ...event }
-      : { ...EMPTY_FORM, date: initialDate || todayKey() }
+      ? {
+          ...EMPTY_FORM,
+          ...event,
+        }
+      : {
+          ...EMPTY_FORM,
+          date: initialDate || todayKey(),
+        }
   );
 
   const [error, setError] = useState("");
 
   useEffect(() => {
     const handleEscape = (e) => {
-      if (e.key === "Escape") onClose();
+      if (
+        e.key === "Escape" &&
+        !saving
+      ) {
+        onClose();
+      }
     };
 
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
-  }, [onClose]);
+    document.addEventListener(
+      "keydown",
+      handleEscape
+    );
+
+    return () =>
+      document.removeEventListener(
+        "keydown",
+        handleEscape
+      );
+  }, [onClose, saving]);
 
   const handleChange = (e) => {
     setForm((previous) => ({
       ...previous,
       [e.target.name]: e.target.value,
     }));
+
     setError("");
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
 
-    if (!form.title.trim()) {
-      setError("Event title is required.");
+    if (saving) return;
+
+    if (form.title.trim().length < 2) {
+      setError(
+        "Event title must contain at least 2 characters."
+      );
       return;
     }
 
     if (!parseDate(form.date)) {
-      setError("Select a valid event date.");
+      setError(
+        "Select a valid event date."
+      );
       return;
     }
 
     if (
       form.time &&
-      !/^([01]\d|2[0-3]):[0-5]\d$/.test(form.time)
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(
+        form.time
+      )
     ) {
-      setError("Enter a valid event time.");
+      setError(
+        "Enter a valid event time."
+      );
       return;
     }
 
@@ -283,7 +422,8 @@ function EventModal({ event, initialDate, onClose, onSave }) {
       type: form.type,
       date: form.date,
       time: form.time,
-      description: form.description.trim(),
+      description:
+        form.description.trim(),
       location: form.location.trim(),
     });
   };
@@ -292,7 +432,12 @@ function EventModal({ event, initialDate, onClose, onSave }) {
     <div
       className="calendar-page__backdrop"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (
+          e.target === e.currentTarget &&
+          !saving
+        ) {
+          onClose();
+        }
       }}
     >
       <section
@@ -304,22 +449,32 @@ function EventModal({ event, initialDate, onClose, onSave }) {
         <div className="calendar-page__modal-header">
           <div>
             <h2 id="calendar-event-title">
-              {event ? "Edit Event" : "Create Event"}
+              {event
+                ? "Edit Event"
+                : "Create Event"}
             </h2>
-            <p>Schedule meetings, calls and reminders.</p>
+
+            <p>
+              Schedule meetings, calls and
+              reminders.
+            </p>
           </div>
 
           <button
             type="button"
             className="calendar-page__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close event form"
           >
             <X size={20} />
           </button>
         </div>
 
-        <form className="calendar-page__form" onSubmit={handleSubmit}>
+        <form
+          className="calendar-page__form"
+          onSubmit={handleSubmit}
+        >
           <label>
             Event Title *
             <input
@@ -329,15 +484,26 @@ function EventModal({ event, initialDate, onClose, onSave }) {
               maxLength={150}
               placeholder="Client project meeting"
               required
+              disabled={saving}
             />
           </label>
 
           <div className="calendar-page__form-grid">
             <label>
               Event Type
-              <select name="type" value={form.type} onChange={handleChange}>
+              <select
+                name="type"
+                value={form.type}
+                onChange={handleChange}
+                disabled={saving}
+              >
                 {EVENT_TYPES.map((type) => (
-                  <option key={type}>{type}</option>
+                  <option
+                    key={type}
+                    value={type}
+                  >
+                    {type}
+                  </option>
                 ))}
               </select>
             </label>
@@ -350,6 +516,7 @@ function EventModal({ event, initialDate, onClose, onSave }) {
                 value={form.date}
                 onChange={handleChange}
                 required
+                disabled={saving}
               />
             </label>
 
@@ -360,6 +527,7 @@ function EventModal({ event, initialDate, onClose, onSave }) {
                 name="time"
                 value={form.time}
                 onChange={handleChange}
+                disabled={saving}
               />
             </label>
 
@@ -371,6 +539,7 @@ function EventModal({ event, initialDate, onClose, onSave }) {
                 onChange={handleChange}
                 maxLength={200}
                 placeholder="Office / Google Meet"
+                disabled={saving}
               />
             </label>
           </div>
@@ -384,12 +553,16 @@ function EventModal({ event, initialDate, onClose, onSave }) {
               rows={4}
               maxLength={2000}
               placeholder="Meeting agenda or reminder notes..."
+              disabled={saving}
             />
           </label>
 
-          {error && (
-            <p className="calendar-page__form-error" role="alert">
-              {error}
+          {(error || serverError) && (
+            <p
+              className="calendar-page__form-error"
+              role="alert"
+            >
+              {error || serverError}
             </p>
           )}
 
@@ -398,14 +571,21 @@ function EventModal({ event, initialDate, onClose, onSave }) {
               type="button"
               className="calendar-page__button calendar-page__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
+
             <button
               type="submit"
               className="calendar-page__button calendar-page__button--primary"
+              disabled={saving}
             >
-              {event ? "Save Changes" : "Create Event"}
+              {saving
+                ? "Saving..."
+                : event
+                  ? "Save Changes"
+                  : "Create Event"}
             </button>
           </div>
         </form>
@@ -414,103 +594,334 @@ function EventModal({ event, initialDate, onClose, onSave }) {
   );
 }
 
-export default function Calendar() {
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
+// ======================================
+// Calendar Page
+// ======================================
 
-  const [selectedDate, setSelectedDate] = useState(todayKey);
-  const [today, setToday] = useState(todayKey);
-  const [events, setEvents] = useState(readEvents);
-  const [integratedEvents, setIntegratedEvents] = useState([]);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingEvent, setEditingEvent] = useState(null);
-  const [storageError, setStorageError] = useState("");
-  const [apiError, setApiError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [revision, setRevision] = useState(0);
+export default function Calendar() {
+  const [currentMonth, setCurrentMonth] =
+    useState(() => {
+      const now = new Date();
+
+      return new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        1
+      );
+    });
+
+  const [selectedDate, setSelectedDate] =
+    useState(todayKey);
+
+  const [today, setToday] =
+    useState(todayKey);
+
+  const [events, setEvents] =
+    useState([]);
+
+  const [
+    integratedEvents,
+    setIntegratedEvents,
+  ] = useState([]);
+
+  const [modalOpen, setModalOpen] =
+    useState(false);
+
+  const [editingEvent, setEditingEvent] =
+    useState(null);
+
+  const [apiError, setApiError] =
+    useState("");
+
+  const [mutationError, setMutationError] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [saving, setSaving] =
+    useState(false);
+
+  const [deletingId, setDeletingId] =
+    useState(null);
+
+  const [revision, setRevision] =
+    useState(0);
 
   const refresh = useCallback(() => {
     setRevision((value) => value + 1);
   }, []);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
-      setStorageError("");
-    } catch {
-      setStorageError("Unable to save local calendar events.");
-    }
-  }, [events]);
+  // ====================================
+  // Visible Calendar Range
+  // ====================================
+
+  const calendarDays = useMemo(() => {
+    const year =
+      currentMonth.getFullYear();
+
+    const month =
+      currentMonth.getMonth();
+
+    const leading = new Date(
+      year,
+      month,
+      1
+    ).getDay();
+
+    const last = new Date(
+      year,
+      month + 1,
+      0
+    ).getDate();
+
+    const cells =
+      Math.ceil((leading + last) / 7) * 7;
+
+    return Array.from(
+      { length: cells },
+      (_, index) => {
+        const date = new Date(
+          year,
+          month,
+          index - leading + 1
+        );
+
+        return {
+          date: toDateKey(date),
+          day: date.getDate(),
+          currentMonth:
+            date.getMonth() === month &&
+            date.getFullYear() === year,
+        };
+      }
+    );
+  }, [currentMonth]);
+
+  // Include the displayed month, today
+  // and the selected date in the API range.
+
+  const dateRange = useMemo(() => {
+    const dates = [
+      calendarDays[0]?.date ||
+        todayKey(),
+      calendarDays[
+        calendarDays.length - 1
+      ]?.date || todayKey(),
+      selectedDate,
+      today,
+    ].sort();
+
+    return {
+      startDate: dates[0],
+      endDate:
+        dates[dates.length - 1],
+    };
+  }, [
+    calendarDays,
+    selectedDate,
+    today,
+  ]);
+
+  // ====================================
+  // Load Manual MongoDB Events
+  // ====================================
 
   useEffect(() => {
-    const controller = new AbortController();
+    const controller =
+      new AbortController();
 
-    async function load() {
+    async function loadEvents() {
       setLoading(true);
 
-      const results = await Promise.allSettled([
-        fetchAll("/tasks", "tasks", controller.signal),
-        fetchAll("/follow-ups", "followUps", controller.signal),
-        fetchAll("/projects", "projects", controller.signal),
-      ]);
+      try {
+        const result =
+          await calendarApi.getEvents(
+            dateRange,
+            {
+              signal:
+                controller.signal,
+            }
+          );
 
-      if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          return;
+        }
 
-      const [tasks, followUps, projects] = results.map((result) =>
-        result.status === "fulfilled" ? result.value : []
+        if (
+          !Array.isArray(result.events)
+        ) {
+          throw new Error(
+            "Unexpected calendar response."
+          );
+        }
+
+        setEvents(
+          result.events.map(
+            normalizeManualEvent
+          )
+        );
+
+        setApiError("");
+      } catch (error) {
+        if (
+          controller.signal.aborted
+        ) {
+          return;
+        }
+
+        setEvents([]);
+
+        setApiError(
+          `Unable to load calendar events: ${getErrorMessage(error)}`
+        );
+      } finally {
+        if (
+          !controller.signal.aborted
+        ) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadEvents();
+
+    return () =>
+      controller.abort();
+  }, [
+    dateRange.startDate,
+    dateRange.endDate,
+    revision,
+  ]);
+
+  // ====================================
+  // Existing Integrated Events
+  // ====================================
+
+  useEffect(() => {
+    const controller =
+      new AbortController();
+
+    async function loadIntegrated() {
+      const results =
+        await Promise.allSettled([
+          fetchAll(
+            "/tasks",
+            "tasks",
+            controller.signal
+          ),
+          fetchAll(
+            "/follow-ups",
+            "followUps",
+            controller.signal
+          ),
+          fetchAll(
+            "/projects",
+            "projects",
+            controller.signal
+          ),
+        ]);
+
+      if (
+        controller.signal.aborted
+      ) {
+        return;
+      }
+
+      const [
+        tasks,
+        followUps,
+        projects,
+      ] = results.map((result) =>
+        result.status === "fulfilled"
+          ? result.value
+          : []
       );
 
       setIntegratedEvents(
-        buildIntegratedEvents(tasks, followUps, projects)
+        buildIntegratedEvents(
+          tasks,
+          followUps,
+          projects
+        )
       );
 
       const failures = results
         .map((result, index) =>
           result.status === "rejected"
-            ? ["Tasks", "Follow-ups", "Projects"][index]
+            ? [
+                "Tasks",
+                "Follow-ups",
+                "Projects",
+              ][index]
             : null
         )
         .filter(Boolean);
 
-      setApiError(
-        failures.length
-          ? `Unable to load: ${failures.join(", ")}. Other events remain available.`
-          : ""
-      );
-      setLoading(false);
+      if (failures.length) {
+        console.error(
+          "Calendar integration failed:",
+          failures.join(", ")
+        );
+      }
     }
 
-    void load();
+    void loadIntegrated();
 
-    return () => controller.abort();
+    return () =>
+      controller.abort();
   }, [revision]);
 
+  // ====================================
+  // Refresh On Window Focus
+  // ====================================
+
   useEffect(() => {
-    const updateToday = () => setToday(todayKey());
+    const updateToday = () =>
+      setToday(todayKey());
+
     const onFocus = () => {
       updateToday();
       refresh();
     };
 
-    const timer = window.setInterval(updateToday, 60_000);
-    window.addEventListener("focus", onFocus);
+    const timer =
+      window.setInterval(
+        updateToday,
+        60_000
+      );
+
+    window.addEventListener(
+      "focus",
+      onFocus
+    );
 
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("focus", onFocus);
+
+      window.removeEventListener(
+        "focus",
+        onFocus
+      );
     };
   }, [refresh]);
+
+  // ====================================
+  // Combined Events
+  // ====================================
 
   const allEvents = useMemo(
     () =>
       [
-        ...events.map((event) => ({ ...event, source: "manual" })),
+        ...events,
         ...integratedEvents,
       ].sort((a, b) =>
-        `${a.date}T${a.time || "00:00"}`.localeCompare(
-          `${b.date}T${b.time || "00:00"}`
+        `${a.date}T${
+          a.time || "00:00"
+        }`.localeCompare(
+          `${b.date}T${
+            b.time || "00:00"
+          }`
         )
       ),
     [events, integratedEvents]
@@ -520,58 +931,86 @@ export default function Calendar() {
     const map = new Map();
 
     allEvents.forEach((event) => {
-      if (!map.has(event.date)) map.set(event.date, []);
-      map.get(event.date).push(event);
+      if (!map.has(event.date)) {
+        map.set(event.date, []);
+      }
+
+      map.get(event.date).push(
+        event
+      );
     });
 
     return map;
   }, [allEvents]);
 
-  const calendarDays = useMemo(() => {
-    const year = currentMonth.getFullYear();
-    const month = currentMonth.getMonth();
-    const leading = new Date(year, month, 1).getDay();
-    const last = new Date(year, month + 1, 0).getDate();
-    const cells = Math.ceil((leading + last) / 7) * 7;
-
-    return Array.from({ length: cells }, (_, index) => {
-      const date = new Date(year, month, index - leading + 1);
-
-      return {
-        date: toDateKey(date),
-        day: date.getDate(),
-        currentMonth:
-          date.getMonth() === month && date.getFullYear() === year,
-      };
-    });
-  }, [currentMonth]);
-
-  const selectedEvents = eventsByDate.get(selectedDate) || [];
+  const selectedEvents =
+    eventsByDate.get(selectedDate) ||
+    [];
 
   const upcomingEvents = useMemo(
-    () => allEvents.filter((event) => event.date >= today).slice(0, 8),
+    () =>
+      allEvents
+        .filter(
+          (event) =>
+            event.date >= today
+        )
+        .slice(0, 8),
     [allEvents, today]
   );
 
+  // ====================================
+  // Statistics
+  // ====================================
+
   const stats = useMemo(() => {
-    const prefix = `${currentMonth.getFullYear()}-${pad(
+    const prefix = `${
+      currentMonth.getFullYear()
+    }-${pad(
       currentMonth.getMonth() + 1
     )}`;
 
     return {
-      total: allEvents.filter((event) => event.date.startsWith(prefix)).length,
-      today: (eventsByDate.get(today) || []).length,
-      upcoming: allEvents.filter((event) => event.date > today).length,
-      tasks: integratedEvents.filter((event) => event.source === "task").length,
+      total: allEvents.filter(
+        (event) =>
+          event.date.startsWith(
+            prefix
+          )
+      ).length,
+
+      today: (
+        eventsByDate.get(today) ||
+        []
+      ).length,
+
+      upcoming: allEvents.filter(
+        (event) =>
+          event.date > today
+      ).length,
+
+      tasks: integratedEvents.filter(
+        (event) =>
+          event.source === "task"
+      ).length,
     };
-  }, [allEvents, currentMonth, today, eventsByDate, integratedEvents]);
+  }, [
+    allEvents,
+    currentMonth,
+    today,
+    eventsByDate,
+    integratedEvents,
+  ]);
+
+  // ====================================
+  // Navigation
+  // ====================================
 
   const changeMonth = (offset) => {
     setCurrentMonth(
       (previous) =>
         new Date(
           previous.getFullYear(),
-          previous.getMonth() + offset,
+          previous.getMonth() +
+            offset,
           1
         )
     );
@@ -579,80 +1018,199 @@ export default function Calendar() {
 
   const goToToday = () => {
     const now = new Date();
-    setCurrentMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+
+    setCurrentMonth(
+      new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        1
+      )
+    );
+
     setSelectedDate(todayKey());
   };
 
   const selectDay = (date) => {
     setSelectedDate(date);
-    const parsed = parseDate(date);
+
+    const parsed =
+      parseDate(date);
 
     if (parsed) {
       setCurrentMonth(
-        new Date(parsed.getFullYear(), parsed.getMonth(), 1)
-      );
-    }
-  };
-
-  const saveEvent = (form) => {
-    const timestamp = new Date().toISOString();
-
-    if (editingEvent) {
-      setEvents((previous) =>
-        previous.map((event) =>
-          event.id === editingEvent.id
-            ? { ...event, ...form, updatedAt: timestamp }
-            : event
+        new Date(
+          parsed.getFullYear(),
+          parsed.getMonth(),
+          1
         )
       );
-    } else {
-      setEvents((previous) => [
-        ...previous,
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-      ]);
     }
+  };
 
-    selectDay(form.date);
+  // ====================================
+  // Modal Controls
+  // ====================================
+
+  const closeModal = useCallback(() => {
+    if (saving) return;
+
     setModalOpen(false);
     setEditingEvent(null);
+    setMutationError("");
+  }, [saving]);
+
+  const openCreateModal = () => {
+    setEditingEvent(null);
+    setMutationError("");
+    setModalOpen(true);
   };
 
-  const deleteEvent = (event) => {
-    if (!window.confirm(`Delete event "${event.title}"?`)) return;
-
-    setEvents((previous) =>
-      previous.filter((item) => item.id !== event.id)
-    );
+  const openEditModal = (event) => {
+    setEditingEvent(event);
+    setMutationError("");
+    setModalOpen(true);
   };
+
+  // ====================================
+  // Create / Update Event
+  // ====================================
+
+  const saveEvent = async (form) => {
+    if (saving) return;
+
+    setSaving(true);
+    setMutationError("");
+
+    try {
+      const result = editingEvent
+        ? await calendarApi.update(
+            editingEvent.id,
+            form
+          )
+        : await calendarApi.create(
+            form
+          );
+
+      if (!result?.event) {
+        throw new Error(
+          "Server did not return the saved event."
+        );
+      }
+
+      const savedEvent =
+        normalizeManualEvent(
+          result.event
+        );
+
+      setEvents((previous) => {
+        const withoutOld =
+          previous.filter(
+            (event) =>
+              event.id !==
+              savedEvent.id
+          );
+
+        return [
+          ...withoutOld,
+          savedEvent,
+        ];
+      });
+
+      selectDay(form.date);
+
+      setModalOpen(false);
+      setEditingEvent(null);
+      setMutationError("");
+
+      refresh();
+    } catch (error) {
+      setMutationError(
+        getErrorMessage(error)
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ====================================
+  // Delete Event
+  // ====================================
+
+  const deleteEvent = async (event) => {
+    if (deletingId) return;
+
+    const confirmed =
+      window.confirm(
+        `Delete event "${event.title}"?`
+      );
+
+    if (!confirmed) return;
+
+    setDeletingId(event.id);
+    setApiError("");
+
+    try {
+      await calendarApi.remove(
+        event.id
+      );
+
+      setEvents((previous) =>
+        previous.filter(
+          (item) =>
+            item.id !== event.id
+        )
+      );
+
+      refresh();
+    } catch (error) {
+      setApiError(
+        `Unable to delete event: ${getErrorMessage(error)}`
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // ====================================
+  // Event Icon
+  // ====================================
 
   const getEventIcon = (type) => {
     switch (type) {
       case "Task":
         return ListTodo;
+
       case "Follow-up":
       case "Call":
         return PhoneCall;
+
       case "Project":
         return FolderKanban;
+
       case "Meeting":
         return Users;
+
       case "Deadline":
         return AlertTriangle;
+
       default:
         return CalendarClock;
     }
   };
 
+  // ====================================
+  // Render Event
+  // ====================================
+
   const renderEvent = (event) => {
-    const Icon = getEventIcon(event.type);
+    const Icon =
+      getEventIcon(event.type);
 
     return (
-      <div className="calendar-page__event" key={event.id}>
+      <div
+        className="calendar-page__event"
+        key={event.id}
+      >
         <div
           className={`calendar-page__event-icon calendar-page__event-icon--${event.type
             .toLowerCase()
@@ -662,14 +1220,23 @@ export default function Calendar() {
         </div>
 
         <div className="calendar-page__event-info">
-          <strong>{event.title}</strong>
+          <strong>
+            {event.title}
+          </strong>
+
           <span>
             <Clock3 size={12} />
             {formatTime(event.time)}
             {" · "}
             {event.type}
           </span>
-          {event.subtitle && <small>{event.subtitle}</small>}
+
+          {event.subtitle && (
+            <small>
+              {event.subtitle}
+            </small>
+          )}
+
           {event.location && (
             <small>
               <MapPin size={12} />
@@ -678,16 +1245,20 @@ export default function Calendar() {
           )}
         </div>
 
-        {event.source === "manual" && (
+        {event.source ===
+          "manual" && (
           <div className="calendar-page__event-actions">
             <button
               type="button"
               title="Edit event"
               aria-label={`Edit ${event.title}`}
-              onClick={() => {
-                setEditingEvent(event);
-                setModalOpen(true);
-              }}
+              onClick={() =>
+                openEditModal(event)
+              }
+              disabled={
+                deletingId ===
+                event.id
+              }
             >
               <Pencil size={15} />
             </button>
@@ -696,7 +1267,13 @@ export default function Calendar() {
               type="button"
               title="Delete event"
               aria-label={`Delete ${event.title}`}
-              onClick={() => deleteEvent(event)}
+              onClick={() =>
+                deleteEvent(event)
+              }
+              disabled={
+                deletingId ===
+                event.id
+              }
             >
               <Trash2 size={15} />
             </button>
@@ -706,6 +1283,10 @@ export default function Calendar() {
     );
   };
 
+  // ====================================
+  // Main UI
+  // ====================================
+
   return (
     <div className="calendar-page">
       <div className="calendar-page__header">
@@ -713,52 +1294,91 @@ export default function Calendar() {
           <span className="calendar-page__eyebrow">
             SCHEDULE MANAGEMENT
           </span>
-          <h1>Calendar &amp; Reminders</h1>
+
+          <h1>
+            Calendar &amp; Reminders
+          </h1>
+
           <p>
-            Track meetings, follow-ups, tasks and project deadlines.
+            Track meetings, follow-ups,
+            tasks and project deadlines.
           </p>
         </div>
 
         <button
           type="button"
           className="calendar-page__button calendar-page__button--primary"
-          onClick={() => {
-            setEditingEvent(null);
-            setModalOpen(true);
-          }}
+          onClick={openCreateModal}
         >
           <Plus size={18} />
           Add Event
         </button>
       </div>
 
-      {(storageError || apiError) && (
-        <div className="calendar-page__error" role="alert">
-          {storageError || apiError}
+      {apiError && (
+        <div
+          className="calendar-page__error"
+          role="alert"
+        >
+          {apiError}
         </div>
       )}
 
       <div className="calendar-page__stats">
         {[
-          { label: "This Month", value: stats.total, icon: CalendarDays },
-          { label: "Today", value: stats.today, icon: Clock3 },
-          { label: "Upcoming", value: stats.upcoming, icon: CheckCircle2 },
-          { label: "Task Deadlines", value: stats.tasks, icon: ListTodo },
-        ].map(({ label, value, icon: Icon }) => (
-          <div className="calendar-page__stat" key={label}>
-            <Icon size={20} />
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+          {
+            label: "This Month",
+            value: stats.total,
+            icon: CalendarDays,
+          },
+          {
+            label: "Today",
+            value: stats.today,
+            icon: Clock3,
+          },
+          {
+            label: "Upcoming",
+            value: stats.upcoming,
+            icon: CheckCircle2,
+          },
+          {
+            label: "Task Deadlines",
+            value: stats.tasks,
+            icon: ListTodo,
+          },
+        ].map(
+          ({
+            label,
+            value,
+            icon: Icon,
+          }) => (
+            <div
+              className="calendar-page__stat"
+              key={label}
+            >
+              <Icon size={20} />
+              <span>{label}</span>
+              <strong>
+                {value}
+              </strong>
+            </div>
+          )
+        )}
       </div>
 
       <div className="calendar-page__layout">
         <section className="calendar-page__panel">
           <div className="calendar-page__calendar-header">
             <div>
-              <h2>{formatMonth(currentMonth)}</h2>
-              <p>Monthly schedule overview</p>
+              <h2>
+                {formatMonth(
+                  currentMonth
+                )}
+              </h2>
+
+              <p>
+                Monthly schedule overview
+              </p>
             </div>
 
             <div className="calendar-page__navigation">
@@ -769,79 +1389,144 @@ export default function Calendar() {
               >
                 Today
               </button>
+
               <button
                 type="button"
-                onClick={() => changeMonth(-1)}
+                onClick={() =>
+                  changeMonth(-1)
+                }
                 aria-label="Previous month"
               >
-                <ChevronLeft size={19} />
+                <ChevronLeft
+                  size={19}
+                />
               </button>
+
               <button
                 type="button"
-                onClick={() => changeMonth(1)}
+                onClick={() =>
+                  changeMonth(1)
+                }
                 aria-label="Next month"
               >
-                <ChevronRight size={19} />
+                <ChevronRight
+                  size={19}
+                />
               </button>
             </div>
           </div>
 
           <div className="calendar-page__weekdays">
-            {WEEKDAYS.map((day) => (
-              <div key={day}>{day}</div>
-            ))}
+            {WEEKDAYS.map(
+              (day) => (
+                <div key={day}>
+                  {day}
+                </div>
+              )
+            )}
           </div>
 
           <div className="calendar-page__grid">
-            {calendarDays.map((day) => {
-              const dayEvents = eventsByDate.get(day.date) || [];
-              const selected = selectedDate === day.date;
-              const isToday = day.date === today;
+            {calendarDays.map(
+              (day) => {
+                const dayEvents =
+                  eventsByDate.get(
+                    day.date
+                  ) || [];
 
-              return (
-                <button
-                  type="button"
-                  key={day.date}
-                  onClick={() => selectDay(day.date)}
-                  aria-label={`${formatDate(day.date)}, ${dayEvents.length} events`}
-                  aria-pressed={selected}
-                  className={[
-                    "calendar-page__day",
-                    !day.currentMonth && "calendar-page__day--outside",
-                    selected && "calendar-page__day--selected",
-                    isToday && "calendar-page__day--today",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                >
-                  <span className="calendar-page__day-number">
-                    {day.day}
-                  </span>
+                const selected =
+                  selectedDate ===
+                  day.date;
 
-                  <div className="calendar-page__day-events">
-                    {dayEvents.slice(0, 2).map((event) => (
-                      <span
-                        key={event.id}
-                        className={`calendar-page__day-event calendar-page__day-event--${event.type
-                          .toLowerCase()
-                          .replace(/\s+/g, "-")}`}
-                        title={event.title}
-                      >
-                        {event.title}
-                      </span>
-                    ))}
+                const isToday =
+                  day.date ===
+                  today;
 
-                    {dayEvents.length > 2 && (
-                      <small>+{dayEvents.length - 2} more</small>
+                return (
+                  <button
+                    type="button"
+                    key={day.date}
+                    onClick={() =>
+                      selectDay(
+                        day.date
+                      )
+                    }
+                    aria-label={`${formatDate(
+                      day.date
+                    )}, ${
+                      dayEvents.length
+                    } events`}
+                    aria-pressed={
+                      selected
+                    }
+                    className={[
+                      "calendar-page__day",
+                      !day.currentMonth &&
+                        "calendar-page__day--outside",
+                      selected &&
+                        "calendar-page__day--selected",
+                      isToday &&
+                        "calendar-page__day--today",
+                    ]
+                      .filter(
+                        Boolean
+                      )
+                      .join(" ")}
+                  >
+                    <span className="calendar-page__day-number">
+                      {day.day}
+                    </span>
+
+                    <div className="calendar-page__day-events">
+                      {dayEvents
+                        .slice(
+                          0,
+                          2
+                        )
+                        .map(
+                          (
+                            event
+                          ) => (
+                            <span
+                              key={
+                                event.id
+                              }
+                              className={`calendar-page__day-event calendar-page__day-event--${event.type
+                                .toLowerCase()
+                                .replace(
+                                  /\s+/g,
+                                  "-"
+                                )}`}
+                              title={
+                                event.title
+                              }
+                            >
+                              {
+                                event.title
+                              }
+                            </span>
+                          )
+                        )}
+
+                      {dayEvents.length >
+                        2 && (
+                        <small>
+                          +
+                          {dayEvents.length -
+                            2}{" "}
+                          more
+                        </small>
+                      )}
+                    </div>
+
+                    {dayEvents.length >
+                      0 && (
+                      <span className="calendar-page__mobile-dot" />
                     )}
-                  </div>
-
-                  {dayEvents.length > 0 && (
-                    <span className="calendar-page__mobile-dot" />
-                  )}
-                </button>
-              );
-            })}
+                  </button>
+                );
+              }
+            )}
           </div>
         </section>
 
@@ -850,19 +1535,28 @@ export default function Calendar() {
             <div className="calendar-page__side-heading">
               <div>
                 <h3>
-                  <CalendarDays size={18} />
-                  {formatDate(selectedDate)}
+                  <CalendarDays
+                    size={18}
+                  />
+                  {formatDate(
+                    selectedDate
+                  )}
                 </h3>
-                <p>{selectedEvents.length} scheduled events</p>
+
+                <p>
+                  {
+                    selectedEvents.length
+                  }{" "}
+                  scheduled events
+                </p>
               </div>
 
               <button
                 type="button"
                 aria-label="Add event on selected date"
-                onClick={() => {
-                  setEditingEvent(null);
-                  setModalOpen(true);
-                }}
+                onClick={
+                  openCreateModal
+                }
               >
                 <Plus size={18} />
               </button>
@@ -870,14 +1564,25 @@ export default function Calendar() {
 
             <div className="calendar-page__event-list">
               {selectedEvents.length ? (
-                selectedEvents.map(renderEvent)
+                selectedEvents.map(
+                  renderEvent
+                )
               ) : (
                 <div className="calendar-page__empty">
-                  <CalendarDays size={28} />
+                  <CalendarDays
+                    size={28}
+                  />
+
                   <strong>
-                    {loading ? "Loading schedule..." : "No events scheduled"}
+                    {loading
+                      ? "Loading schedule..."
+                      : "No events scheduled"}
                   </strong>
-                  <p>Select another date or add an event.</p>
+
+                  <p>
+                    Select another date
+                    or add an event.
+                  </p>
                 </div>
               )}
             </div>
@@ -887,46 +1592,81 @@ export default function Calendar() {
             <div className="calendar-page__side-heading">
               <div>
                 <h3>
-                  <Clock3 size={18} />
+                  <Clock3
+                    size={18}
+                  />
                   Upcoming Schedule
                 </h3>
-                <p>Next 8 scheduled events</p>
+
+                <p>
+                  Next 8 scheduled
+                  events
+                </p>
               </div>
             </div>
 
             <div className="calendar-page__upcoming">
               {upcomingEvents.length ? (
-                upcomingEvents.map((event) => {
-                  const Icon = getEventIcon(event.type);
+                upcomingEvents.map(
+                  (event) => {
+                    const Icon =
+                      getEventIcon(
+                        event.type
+                      );
 
-                  return (
-                    <button
-                      type="button"
-                      key={event.id}
-                      onClick={() => selectDay(event.date)}
-                      className="calendar-page__upcoming-item"
-                    >
-                      <span className="calendar-page__upcoming-icon">
-                        <Icon size={17} />
-                      </span>
+                    return (
+                      <button
+                        type="button"
+                        key={
+                          event.id
+                        }
+                        onClick={() =>
+                          selectDay(
+                            event.date
+                          )
+                        }
+                        className="calendar-page__upcoming-item"
+                      >
+                        <span className="calendar-page__upcoming-icon">
+                          <Icon
+                            size={17}
+                          />
+                        </span>
 
-                      <span>
-                        <strong>{event.title}</strong>
-                        <small>
-                          {formatDate(event.date)}
-                          {" · "}
-                          {formatTime(event.time)}
-                        </small>
-                      </span>
+                        <span>
+                          <strong>
+                            {
+                              event.title
+                            }
+                          </strong>
 
-                      <ChevronRight size={15} />
-                    </button>
-                  );
-                })
+                          <small>
+                            {formatDate(
+                              event.date
+                            )}
+                            {" · "}
+                            {formatTime(
+                              event.time
+                            )}
+                          </small>
+                        </span>
+
+                        <ChevronRight
+                          size={15}
+                        />
+                      </button>
+                    );
+                  }
+                )
               ) : (
                 <div className="calendar-page__empty">
-                  <CalendarClock size={28} />
-                  <p>No upcoming events.</p>
+                  <CalendarClock
+                    size={28}
+                  />
+
+                  <p>
+                    No upcoming events.
+                  </p>
                 </div>
               )}
             </div>
@@ -937,12 +1677,21 @@ export default function Calendar() {
       {modalOpen && (
         <EventModal
           event={editingEvent}
-          initialDate={selectedDate}
-          onClose={() => {
-            setModalOpen(false);
-            setEditingEvent(null);
-          }}
-          onSave={saveEvent}
+          initialDate={
+            selectedDate
+          }
+          onClose={
+            closeModal
+          }
+          onSave={
+            saveEvent
+          }
+          saving={
+            saving
+          }
+          serverError={
+            mutationError
+          }
         />
       )}
     </div>

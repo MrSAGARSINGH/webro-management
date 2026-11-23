@@ -27,10 +27,6 @@ import {
 
 import "./Employees.scss";
 
-// ======================================
-// Constants
-// ======================================
-
 const DEPARTMENTS = [
   "Development",
   "Design",
@@ -71,16 +67,8 @@ const EMPTY_FORM = {
   status: "Active",
   joiningDate: "",
   monthlySalary: "",
-  assignedProjects: "",
-  assignedTasks: "",
   notes: "",
 };
-
-const PAGE_SIZE = 100;
-
-// ======================================
-// Helpers
-// ======================================
 
 const money = (value) =>
   new Intl.NumberFormat("en-IN", {
@@ -89,14 +77,32 @@ const money = (value) =>
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
 
+const getId = (value) =>
+  typeof value === "string"
+    ? value
+    : value?._id || value?.id || "";
+
+const getError = (error) =>
+  error instanceof Error
+    ? error.message
+    : "Something went wrong.";
+
+const dateInputValue = (value) => {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toISOString().slice(0, 10);
+};
+
 const formatDate = (value) => {
   if (!value) return "—";
 
   const date = new Date(value);
 
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
+  if (Number.isNaN(date.getTime())) return "—";
 
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
@@ -106,44 +112,19 @@ const formatDate = (value) => {
   }).format(date);
 };
 
-const dateInputValue = (value) => {
-  if (!value) return "";
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-
-  return date.toISOString().slice(0, 10);
-};
-
 const todayKey = () => {
   const date = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
 
-  const pad = (number) =>
-    String(number).padStart(2, "0");
-
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-");
 };
-
-const getId = (value) => {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  return value?._id || value?.id || "";
-};
-
-const getErrorMessage = (error) =>
-  error instanceof Error
-    ? error.message
-    : "Something went wrong.";
 
 const mapEmployee = (employee) => {
-  const user =
+  const account =
     employee.user &&
     typeof employee.user === "object"
       ? employee.user
@@ -153,9 +134,9 @@ const mapEmployee = (employee) => {
     id: getId(employee),
     userId: getId(employee.user),
     employeeId: employee.employeeId || "",
-    name: user.name || "Unknown Employee",
-    email: user.email || "",
-    phone: user.phone || "",
+    name: account.name || "Unknown Employee",
+    email: account.email || "",
+    phone: account.phone || "",
     role: employee.designation || "",
     department: employee.department || "",
     employmentType:
@@ -168,15 +149,9 @@ const mapEmployee = (employee) => {
       employee.salary?.amount ?? null,
     salaryType:
       employee.salary?.type || "Monthly",
-    assignedProjects: null,
-    assignedTasks: null,
     notes: employee.notes || "",
   };
 };
-
-// ======================================
-// Employee Modal
-// ======================================
 
 function EmployeeModal({
   employee,
@@ -199,7 +174,7 @@ function EmployeeModal({
           ...employee,
           user: employee.userId,
           monthlySalary:
-            employee.monthlySalary === null
+            employee.monthlySalary == null
               ? ""
               : String(employee.monthlySalary),
         }
@@ -210,31 +185,28 @@ function EmployeeModal({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const handleEscape = (event) => {
+    const onEscape = (event) => {
       if (event.key === "Escape" && !saving) {
         onClose();
       }
     };
 
-    document.addEventListener(
-      "keydown",
-      handleEscape
-    );
+    document.addEventListener("keydown", onEscape);
 
     return () => {
       document.removeEventListener(
         "keydown",
-        handleEscape
+        onEscape
       );
     };
   }, [onClose, saving]);
 
-  const handleChange = (event) => {
+  const change = (event) => {
     const { name, value } = event.target;
 
-    if (name === "user" && !isEditing) {
+    if (name === "user") {
       const selected = availableUsers.find(
-        (user) => getId(user) === value
+        (item) => getId(item) === value
       );
 
       setForm((previous) => ({
@@ -254,10 +226,10 @@ function EmployeeModal({
     setError("");
   };
 
-  const changeAccountMode = (mode) => {
+  const changeAccountMode = (value) => {
     if (saving || createdUserId) return;
 
-    setAccountMode(mode);
+    setAccountMode(value);
     setError("");
 
     setForm((previous) => ({
@@ -270,90 +242,71 @@ function EmployeeModal({
     }));
   };
 
-  const handleSubmit = async (event) => {
+  const submit = async (event) => {
     event.preventDefault();
 
     if (saving) return;
 
     const creatingAccount =
-      !isEditing &&
-      accountMode === "new";
+      !isEditing && accountMode === "new";
 
     if (
       !isEditing &&
       !creatingAccount &&
       !form.user
     ) {
-      setError(
-        "Please select an existing user account."
-      );
+      setError("Select an existing user.");
       return;
     }
 
     if (creatingAccount && !createdUserId) {
       if (form.name.trim().length < 2) {
-        setError(
-          "Employee name must contain at least 2 characters."
-        );
+        setError("Enter a valid employee name.");
         return;
       }
 
-      const email = form.email.trim();
-
       if (
         !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-          email
+          form.email.trim()
         )
       ) {
-        setError(
-          "Please enter a valid email address."
-        );
+        setError("Enter a valid email.");
         return;
       }
 
       if (
         form.phone.trim() &&
-        !/^[6-9]\d{9}$/.test(
-          form.phone.trim()
-        )
+        !/^[6-9]\d{9}$/.test(form.phone.trim())
       ) {
-        setError(
-          "Enter a valid 10-digit Indian mobile number."
-        );
+        setError("Enter a valid mobile number.");
         return;
       }
+
+      const passwordBytes = new TextEncoder().encode(
+        form.password
+      ).length;
 
       if (
         form.password.length < 12 ||
-        new TextEncoder().encode(
-          form.password
-        ).length > 72
+        passwordBytes > 72
       ) {
         setError(
-          "Password must be at least 12 characters and at most 72 UTF-8 bytes."
+          "Password must contain at least 12 characters and at most 72 UTF-8 bytes."
         );
         return;
       }
     }
 
-    const role = form.role.trim();
-
-    if (role.length < 2) {
-      setError(
-        "Employee job role must contain at least 2 characters."
-      );
+    if (form.role.trim().length < 2) {
+      setError("Enter a valid job role.");
       return;
     }
 
-    if (!form.joiningDate) {
-      setError("Joining date is required.");
-      return;
-    }
-
-    if (form.joiningDate > todayKey()) {
-      setError(
-        "Joining date cannot be in the future."
-      );
+    if (
+      !form.joiningDate ||
+      form.joiningDate > todayKey()
+    ) {
+      setError("Enter a valid joining date.");
       return;
     }
 
@@ -366,15 +319,9 @@ function EmployeeModal({
       salary !== null &&
       (!Number.isFinite(salary) ||
         salary < 0 ||
-        salary > 999999999999 ||
-        Math.abs(
-          salary * 100 -
-            Math.round(salary * 100)
-        ) > 0.00001)
+        salary > 999999999999)
     ) {
-      setError(
-        "Enter a valid monthly salary."
-      );
+      setError("Enter a valid salary.");
       return;
     }
 
@@ -382,55 +329,47 @@ function EmployeeModal({
       setSaving(true);
       setError("");
 
-      const profile = {
-        designation: role,
-        department: form.department,
-        employmentType:
-          form.employmentType,
-        joiningDate: toEmployeeISODate(
-          form.joiningDate
-        ),
-        notes: form.notes.trim(),
-      };
-
       let userId = form.user;
 
       if (creatingAccount) {
         if (createdUserId) {
           userId = createdUserId;
         } else {
-          const userPayload = {
+          const payload = {
             name: form.name.trim(),
-            email: form.email
-              .trim()
-              .toLowerCase(),
-            role: "employee",
+            email: form.email.trim().toLowerCase(),
             password: form.password,
+            role: "employee",
           };
 
           if (form.phone.trim()) {
-            userPayload.phone =
-              form.phone.trim();
+            payload.phone = form.phone.trim();
           }
 
           const result =
-            await employeeApi.createUser(
-              userPayload
-            );
+            await employeeApi.createUser(payload);
 
-          userId = getId(result?.user);
+          userId = getId(result.user);
 
           if (!userId) {
             throw new Error(
-              "User creation response did not contain a user ID. Check the Users list before retrying."
+              "Account created but user ID was not returned. Verify the account before retrying."
             );
           }
 
-          // Preserve the newly created account
-          // if employee creation fails.
           setCreatedUserId(userId);
         }
       }
+
+      const profile = {
+        designation: form.role.trim(),
+        department: form.department,
+        employmentType: form.employmentType,
+        joiningDate: toEmployeeISODate(
+          form.joiningDate
+        ),
+        notes: form.notes.trim(),
+      };
 
       if (!isEditing) {
         profile.user = userId;
@@ -457,7 +396,7 @@ function EmployeeModal({
         status: form.status,
       });
     } catch (err) {
-      setError(getErrorMessage(err));
+      setError(getError(err));
     } finally {
       setSaving(false);
     }
@@ -468,8 +407,7 @@ function EmployeeModal({
       className="employees__modal-backdrop"
       onMouseDown={(event) => {
         if (
-          event.target ===
-            event.currentTarget &&
+          event.target === event.currentTarget &&
           !saving
         ) {
           onClose();
@@ -489,11 +427,7 @@ function EmployeeModal({
                 ? "Edit Employee"
                 : "Add New Employee"}
             </h2>
-
-            <p>
-              Manage employee details and
-              work assignments.
-            </p>
+            <p>Manage employee details.</p>
           </div>
 
           <button
@@ -501,7 +435,7 @@ function EmployeeModal({
             className="employees__icon-button"
             onClick={onClose}
             disabled={saving}
-            aria-label="Close form"
+            aria-label="Close"
           >
             <X size={20} />
           </button>
@@ -509,80 +443,73 @@ function EmployeeModal({
 
         <form
           className="employees__form"
-          onSubmit={handleSubmit}
+          onSubmit={submit}
         >
           <div className="employees__form-grid">
             {!isEditing && (
-              <div className="employees__form-full">
-                <label>
-                  Employee Account Type *
-                  <select
-                    value={accountMode}
-                    onChange={(event) =>
-                      changeAccountMode(
-                        event.target.value
-                      )
-                    }
-                    disabled={
-                      saving ||
-                      Boolean(createdUserId)
-                    }
-                  >
-                    <option value="existing">
-                      Select Existing User
-                    </option>
-
-                    <option value="new">
-                      Create New User Account
-                    </option>
-                  </select>
-                </label>
-              </div>
+              <label className="employees__form-full">
+                Account Type
+                <select
+                  value={accountMode}
+                  onChange={(event) =>
+                    changeAccountMode(
+                      event.target.value
+                    )
+                  }
+                  disabled={
+                    saving || Boolean(createdUserId)
+                  }
+                >
+                  <option value="existing">
+                    Existing User
+                  </option>
+                  <option value="new">
+                    Create New Account
+                  </option>
+                </select>
+              </label>
             )}
 
             {!isEditing &&
               accountMode === "existing" && (
                 <label className="employees__form-full">
-                  Employee User Account *
+                  User Account *
                   <select
                     name="user"
                     value={form.user}
-                    onChange={handleChange}
+                    onChange={change}
                     required
                   >
                     <option value="">
-                      Select Employee Account
+                      Select Account
                     </option>
-
-                    {availableUsers.map(
-                      (user) => (
-                        <option
-                          key={getId(user)}
-                          value={getId(user)}
-                        >
-                          {user.name} (
-                          {user.email})
-                        </option>
-                      )
-                    )}
+                    {availableUsers.map((item) => (
+                      <option
+                        key={getId(item)}
+                        value={getId(item)}
+                      >
+                        {item.name} ({item.email})
+                      </option>
+                    ))}
                   </select>
                 </label>
               )}
 
             <label>
-              Full Name *
+              Full Name
               <input
                 name="name"
                 value={form.name}
-                onChange={handleChange}
-                maxLength={100}
-                placeholder="Employee name"
+                onChange={change}
                 readOnly={
                   isEditing ||
                   accountMode === "existing" ||
                   Boolean(createdUserId)
                 }
-                required
+                required={creatingRequired(
+                  isEditing,
+                  accountMode
+                )}
               />
             </label>
 
@@ -591,9 +518,8 @@ function EmployeeModal({
               <input
                 name="role"
                 value={form.role}
-                onChange={handleChange}
+                onChange={change}
                 maxLength={100}
-                placeholder="Full Stack Developer"
                 required
               />
             </label>
@@ -604,30 +530,27 @@ function EmployeeModal({
                 type="email"
                 name="email"
                 value={form.email}
-                onChange={handleChange}
-                maxLength={150}
-                placeholder="employee@example.com"
+                onChange={change}
                 readOnly={
                   isEditing ||
                   accountMode === "existing" ||
                   Boolean(createdUserId)
                 }
-                required={
-                  !isEditing &&
-                  accountMode === "new"
-                }
+                required={creatingRequired(
+                  isEditing,
+                  accountMode
+                )}
               />
             </label>
 
             <label>
               Mobile Number
               <input
-                type="tel"
                 name="phone"
+                type="tel"
                 value={form.phone}
-                onChange={handleChange}
+                onChange={change}
                 maxLength={10}
-                placeholder="10-digit mobile number"
                 readOnly={
                   isEditing ||
                   accountMode === "existing" ||
@@ -642,13 +565,12 @@ function EmployeeModal({
                 <label className="employees__form-full">
                   Account Password *
                   <input
-                    type="password"
                     name="password"
+                    type="password"
                     value={form.password}
-                    onChange={handleChange}
+                    onChange={change}
                     minLength={12}
                     autoComplete="new-password"
-                    placeholder="Minimum 12 characters"
                     required
                   />
                 </label>
@@ -659,17 +581,13 @@ function EmployeeModal({
               <select
                 name="department"
                 value={form.department}
-                onChange={handleChange}
+                onChange={change}
               >
-                {DEPARTMENTS.map(
-                  (department) => (
-                    <option
-                      key={department}
-                    >
-                      {department}
-                    </option>
-                  )
-                )}
+                {DEPARTMENTS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -678,33 +596,29 @@ function EmployeeModal({
               <select
                 name="employmentType"
                 value={form.employmentType}
-                onChange={handleChange}
+                onChange={change}
               >
-                {EMPLOYMENT_TYPES.map(
-                  (type) => (
-                    <option key={type}>
-                      {type}
-                    </option>
-                  )
-                )}
+                {EMPLOYMENT_TYPES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
               </select>
             </label>
 
             <label>
-              Employment Status
+              Status
               <select
                 name="status"
                 value={form.status}
-                onChange={handleChange}
+                onChange={change}
                 disabled={!isEditing}
               >
-                {STATUSES.map(
-                  (status) => (
-                    <option key={status}>
-                      {status}
-                    </option>
-                  )
-                )}
+                {STATUSES.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -714,7 +628,7 @@ function EmployeeModal({
                 type="date"
                 name="joiningDate"
                 value={form.joiningDate}
-                onChange={handleChange}
+                onChange={change}
                 max={todayKey()}
                 required
               />
@@ -726,63 +640,29 @@ function EmployeeModal({
                 type="number"
                 name="monthlySalary"
                 value={form.monthlySalary}
-                onChange={handleChange}
+                onChange={change}
                 min="0"
                 max="999999999999"
                 step="0.01"
-                placeholder="25000"
-              />
-            </label>
-
-            <label>
-              Assigned Projects
-              <input
-                type="text"
-                value="Managed from Projects"
-                readOnly
-              />
-            </label>
-
-            <label>
-              Assigned Tasks
-              <input
-                type="text"
-                value="Managed from Tasks"
-                readOnly
               />
             </label>
 
             <label className="employees__form-full">
-              Additional Notes
+              Notes
               <textarea
                 name="notes"
                 value={form.notes}
-                onChange={handleChange}
+                onChange={change}
+                maxLength={5000}
                 rows={3}
-                maxLength={2000}
-                placeholder="Employee information..."
               />
             </label>
           </div>
 
-          {!isEditing &&
-            accountMode === "existing" &&
-            availableUsers.length === 0 && (
-              <p
-                className="employees__form-error"
-                role="status"
-              >
-                No available employee user
-                accounts. Select Create New
-                User Account instead.
-              </p>
-            )}
-
           {createdUserId && (
             <p role="status">
-              User account created. If
-              employee saving fails, retry
-              will reuse this account.
+              Account created. Retry will reuse
+              the same user account.
             </p>
           )}
 
@@ -808,13 +688,7 @@ function EmployeeModal({
             <button
               type="submit"
               className="employees__button employees__button--primary"
-              disabled={
-                saving ||
-                (!isEditing &&
-                  accountMode ===
-                    "existing" &&
-                  availableUsers.length === 0)
-              }
+              disabled={saving}
             >
               {saving
                 ? "Saving..."
@@ -829,189 +703,143 @@ function EmployeeModal({
   );
 }
 
-// ======================================
-// Employees Page
-// ======================================
+function creatingRequired(isEditing, accountMode) {
+  return !isEditing && accountMode === "new";
+}
 
-export default function Employees() {
-  const [employees, setEmployees] =
+export default function Employees({ user }) {
+  const canManageEmployees =
+    user?.role === "admin";
+
+  const canViewStats =
+    user?.role === "admin" ||
+    user?.role === "manager";
+
+  const [employees, setEmployees] = useState([]);
+  const [availableUsers, setAvailableUsers] =
     useState([]);
 
-  const [search, setSearch] =
-    useState("");
+  const [search, setSearch] = useState("");
+  const [departmentFilter, setDepartmentFilter] =
+    useState("All");
+  const [statusFilter, setStatusFilter] =
+    useState("All");
 
-  const [
-    departmentFilter,
-    setDepartmentFilter,
-  ] = useState("All");
-
-  const [
-    statusFilter,
-    setStatusFilter,
-  ] = useState("All");
-
-  const [
-    editingEmployee,
-    setEditingEmployee,
-  ] = useState(null);
-
-  const [modalOpen, setModalOpen] =
-    useState(false);
-
-  const [
-    availableUsers,
-    setAvailableUsers,
-  ] = useState([]);
-
-  const [
-    storageError,
-    setStorageError,
-  ] = useState("");
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [statsData, setStatsData] =
+  const [editingEmployee, setEditingEmployee] =
     useState(null);
+  const [modalOpen, setModalOpen] = useState(false);
 
-  const [
-    totalEmployees,
-    setTotalEmployees,
-  ] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [statsData, setStatsData] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const [
-    refreshKey,
-    setRefreshKey,
-  ] = useState(0);
-
-  const [busy, setBusy] =
-    useState(false);
-
-  // ====================================
-  // Fetch Employees
-  // ====================================
+  const refresh = useCallback(() => {
+    setRefreshKey((value) => value + 1);
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
-    const loadEmployees = async () => {
+    async function load() {
+      setLoading(true);
+      setError("");
+
       try {
-        setLoading(true);
-        setStorageError("");
-
-        const allEmployees = [];
+        const records = [];
         let page = 1;
         let totalPages = 1;
 
         do {
-          const result =
-            await employeeApi.getAll({
+          const result = await employeeApi.getAll(
+            {
               page,
-              limit: PAGE_SIZE,
-            });
-
-          if (cancelled) return;
-
-          allEmployees.push(
-            ...(result.employees || [])
+              limit: 100,
+            },
+            { signal: controller.signal }
           );
 
+          if (controller.signal.aborted) return;
+
+          records.push(...(result.employees || []));
+
           totalPages =
-            result.pagination?.totalPages ||
-            1;
+            result.pagination?.totalPages || 1;
 
           page += 1;
         } while (page <= totalPages);
 
-        if (cancelled) return;
-
-        setEmployees(
-          allEmployees.map(mapEmployee)
-        );
-
-        setTotalEmployees(
-          allEmployees.length
-        );
+        if (!controller.signal.aborted) {
+          setEmployees(records.map(mapEmployee));
+        }
       } catch (err) {
-        if (!cancelled) {
-          setStorageError(
-            getErrorMessage(err)
-          );
+        if (!controller.signal.aborted) {
+          setError(getError(err));
         }
       } finally {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setLoading(false);
         }
       }
-    };
+    }
 
-    void loadEmployees();
+    void load();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [refreshKey]);
 
-  // ====================================
-  // Fetch Stats
-  // ====================================
-
   useEffect(() => {
-    let cancelled = false;
+    if (!canViewStats) {
+      setStatsData(null);
+      return;
+    }
 
-    const loadStats = async () => {
+    const controller = new AbortController();
+
+    async function loadStats() {
       try {
-        const result =
-          await employeeApi.getStats();
+        const result = await employeeApi.getStats({
+          signal: controller.signal,
+        });
 
-        if (!cancelled) {
-          setStatsData(
-            result.stats || null
-          );
+        if (!controller.signal.aborted) {
+          setStatsData(result.stats || null);
         }
       } catch {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setStatsData(null);
         }
       }
-    };
+    }
 
     void loadStats();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
+    return () => controller.abort();
+  }, [refreshKey, canViewStats]);
 
-  const refreshEmployees =
-    useCallback(() => {
-      setRefreshKey(
-        (value) => value + 1
-      );
-    }, []);
+  const openAdd = async () => {
+    if (!canManageEmployees || busy) return;
 
-  // ====================================
-  // Add Employee
-  // ====================================
-
-  const openAddEmployee = async () => {
     try {
-      setStorageError("");
+      setError("");
 
       const result =
         await employeeApi.getAvailableUsers();
 
-      setAvailableUsers(
-        result.users || []
-      );
-
+      setAvailableUsers(result.users || []);
       setEditingEmployee(null);
       setModalOpen(true);
     } catch (err) {
-      setStorageError(
-        getErrorMessage(err)
-      );
+      setError(getError(err));
     }
+  };
+
+  const openEdit = (employee) => {
+    if (!canManageEmployees || busy) return;
+
+    setEditingEmployee(employee);
+    setModalOpen(true);
   };
 
   const closeModal = () => {
@@ -1021,77 +849,65 @@ export default function Employees() {
     setEditingEmployee(null);
   };
 
-  // ====================================
-  // Save Employee
-  // ====================================
-
   const saveEmployee = async ({
     profile,
     salary,
     status,
   }) => {
+    if (!canManageEmployees) {
+      throw new Error("Admin access required.");
+    }
+
     setBusy(true);
 
     try {
       if (editingEmployee) {
-        const id =
-          editingEmployee.id;
-
-        await employeeApi.update(
-          id,
-          profile
-        );
-
-        if (salary) {
-          await employeeApi.updateSalary(
-            id,
-            salary
-          );
-        }
+        const id = editingEmployee.id;
 
         if (
-          status !==
-          editingEmployee.status
+          ["Resigned", "Terminated"].includes(status) &&
+          status !== editingEmployee.status
         ) {
-          if (
-            status === "Resigned" ||
-            status === "Terminated"
-          ) {
-            throw new Error(
-              "For Resigned or Terminated status, use the separate exit-date workflow."
-            );
-          }
-
-          await employeeApi.updateStatus(
-            id,
-            status
+          throw new Error(
+            "Use the exit-date workflow to resign or terminate an employee."
           );
         }
+
+        await employeeApi.update(id, profile);
+
+        if (salary) {
+          await employeeApi.updateSalary(id, salary);
+        }
+
+        if (status !== editingEmployee.status) {
+          await employeeApi.updateStatus(id, status);
+        }
       } else {
-        await employeeApi.create(
-          profile
-        );
+        await employeeApi.create(profile);
       }
 
       setModalOpen(false);
       setEditingEmployee(null);
-
-      refreshEmployees();
+      refresh();
     } catch (err) {
-      refreshEmployees();
+      refresh();
       throw err;
     } finally {
       setBusy(false);
     }
   };
 
-  // ====================================
-  // Mark Employee as Resigned
-  // ====================================
+  const resignEmployee = async (employee) => {
+    if (!canManageEmployees || busy) return;
 
-  const deleteEmployee = async (
-    employee
-  ) => {
+    if (
+      ["Resigned", "Terminated"].includes(
+        employee.status
+      )
+    ) {
+      return;
+    }
+
     if (
       !window.confirm(
         `Mark "${employee.name}" as resigned?`
@@ -1105,36 +921,26 @@ export default function Employees() {
       todayKey()
     );
 
-    if (exitDate === null) {
-      return;
-    }
+    if (exitDate === null) return;
 
     const date = new Date(
       `${exitDate}T12:00:00`
     );
 
     if (
-      !/^\d{4}-\d{2}-\d{2}$/.test(
-        exitDate
-      ) ||
-      Number.isNaN(
-        date.getTime()
-      ) ||
-      dateInputValue(date) !==
-        exitDate
+      !/^\d{4}-\d{2}-\d{2}$/.test(exitDate) ||
+      Number.isNaN(date.getTime()) ||
+      dateInputValue(date) !== exitDate
     ) {
-      setStorageError(
-        "Invalid exit date."
-      );
+      setError("Invalid exit date.");
       return;
     }
 
     if (
       employee.joiningDate &&
-      exitDate <
-        employee.joiningDate
+      exitDate < employee.joiningDate
     ) {
-      setStorageError(
+      setError(
         "Exit date cannot be before joining date."
       );
       return;
@@ -1142,140 +948,89 @@ export default function Employees() {
 
     try {
       setBusy(true);
-      setStorageError("");
+      setError("");
 
       await employeeApi.updateStatus(
         employee.id,
         "Resigned",
-        toEmployeeISODate(
-          exitDate
-        )
+        exitDate
       );
 
-      refreshEmployees();
+      refresh();
     } catch (err) {
-      setStorageError(
-        getErrorMessage(err)
-      );
+      setError(getError(err));
     } finally {
       setBusy(false);
     }
   };
 
-  // ====================================
-  // Statistics
-  // ====================================
+  const filteredEmployees = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return employees
+      .filter((employee) => {
+        const matchesSearch = [
+          employee.name,
+          employee.email,
+          employee.phone,
+          employee.role,
+          employee.department,
+        ].some((value) =>
+          String(value || "")
+            .toLowerCase()
+            .includes(query)
+        );
+
+        return (
+          matchesSearch &&
+          (departmentFilter === "All" ||
+            employee.department ===
+              departmentFilter) &&
+          (statusFilter === "All" ||
+            employee.status === statusFilter)
+        );
+      })
+      .sort((a, b) =>
+        a.name.localeCompare(b.name)
+      );
+  }, [
+    employees,
+    search,
+    departmentFilter,
+    statusFilter,
+  ]);
 
   const stats = useMemo(() => {
     const active = employees.filter(
-      (employee) =>
-        employee.status ===
-        "Active"
-    );
+      (employee) => employee.status === "Active"
+    ).length;
 
-    const onLeave =
-      employees.filter(
+    const onLeave = employees.filter(
+      (employee) => employee.status === "On Leave"
+    ).length;
+
+    const payroll = employees
+      .filter(
         (employee) =>
-          employee.status ===
-          "On Leave"
+          !["Resigned", "Terminated"].includes(
+            employee.status
+          ) &&
+          employee.salaryType === "Monthly"
+      )
+      .reduce(
+        (total, employee) =>
+          total +
+          (Number(employee.monthlySalary) || 0),
+        0
       );
 
-    const monthlyPayroll =
-      employees
-        .filter(
-          (employee) =>
-            ![
-              "Resigned",
-              "Terminated",
-            ].includes(
-              employee.status
-            ) &&
-            employee.salaryType ===
-              "Monthly"
-        )
-        .reduce(
-          (sum, employee) =>
-            sum +
-            (Number(
-              employee.monthlySalary
-            ) || 0),
-          0
-        );
-
     return {
-      total:
-        statsData?.total ??
-        totalEmployees,
-
-      active:
-        statsData?.active ??
-        active.length,
-
-      onLeave:
-        statsData?.onLeave ??
-        onLeave.length,
-
-      monthlyPayroll,
-
-      assignedProjects: null,
+      total: statsData?.total ?? employees.length,
+      active: statsData?.active ?? active,
+      onLeave: statsData?.onLeave ?? onLeave,
+      payroll,
     };
-  }, [
-    employees,
-    statsData,
-    totalEmployees,
-  ]);
-
-  // ====================================
-  // Search and Filters
-  // ====================================
-
-  const filteredEmployees =
-    useMemo(() => {
-      const query = search
-        .trim()
-        .toLowerCase();
-
-      return employees
-        .filter((employee) => {
-          const matchesSearch = [
-            employee.name,
-            employee.email,
-            employee.phone,
-            employee.role,
-            employee.department,
-          ].some((value) =>
-            String(value ?? "")
-              .toLowerCase()
-              .includes(query)
-          );
-
-          return (
-            matchesSearch &&
-            (departmentFilter ===
-              "All" ||
-              employee.department ===
-                departmentFilter) &&
-            (statusFilter ===
-              "All" ||
-              employee.status ===
-                statusFilter)
-          );
-        })
-        .sort((a, b) =>
-          a.name.localeCompare(
-            b.name
-          )
-        );
-    }, [
-      employees,
-      search,
-      departmentFilter,
-      statusFilter,
-    ]);
-
-  // ====================================
-  // Dashboard Cards
-  // ====================================
+  }, [employees, statsData]);
 
   const cards = [
     {
@@ -1295,15 +1050,14 @@ export default function Employees() {
     },
     {
       label: "Monthly Payroll",
-      value: employees.some(
-        (employee) =>
-          employee.monthlySalary !==
-          null
-      )
-        ? money(
-            stats.monthlyPayroll
-          )
-        : "—",
+      value:
+        canViewStats &&
+        employees.some(
+          (employee) =>
+            employee.monthlySalary !== null
+        )
+          ? money(stats.payroll)
+          : "—",
       icon: Wallet,
     },
     {
@@ -1313,10 +1067,6 @@ export default function Employees() {
     },
   ];
 
-  // ====================================
-  // Original UI
-  // ====================================
-
   return (
     <div className="employees">
       <div className="employees__header">
@@ -1325,56 +1075,47 @@ export default function Employees() {
             TEAM MANAGEMENT
           </span>
 
-          <h1>
-            Employee Management
-          </h1>
+          <h1>Employee Management</h1>
 
           <p>
             Manage employee profiles,
-            departments, salaries and
-            work assignments.
+            departments and work assignments.
           </p>
         </div>
 
-        <button
-          type="button"
-          className="employees__button employees__button--primary"
-          onClick={() => {
-            void openAddEmployee();
-          }}
-          disabled={busy}
-        >
-          <Plus size={18} />
-          Add Employee
-        </button>
+        {canManageEmployees && (
+          <button
+            type="button"
+            className="employees__button employees__button--primary"
+            onClick={openAdd}
+            disabled={busy}
+          >
+            <Plus size={18} />
+            Add Employee
+          </button>
+        )}
       </div>
 
-      {storageError && (
+      {error && (
         <div
           className="employees__error"
           role="alert"
         >
-          {storageError}
+          {error}
         </div>
       )}
 
       <div className="employees__stats">
-        {cards.map(
-          ({
-            label,
-            value,
-            icon: Icon,
-          }) => (
-            <div
-              className="employees__stat"
-              key={label}
-            >
-              <Icon size={21} />
-              <span>{label}</span>
-              <strong>{value}</strong>
-            </div>
-          )
-        )}
+        {cards.map(({ label, value, icon: Icon }) => (
+          <div
+            key={label}
+            className="employees__stat"
+          >
+            <Icon size={21} />
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
       </div>
 
       <section className="employees__panel">
@@ -1386,8 +1127,7 @@ export default function Employees() {
             </h2>
 
             <p>
-              Employee profiles and
-              employment details.
+              Employee profiles and employment details.
             </p>
           </div>
         </div>
@@ -1400,11 +1140,9 @@ export default function Employees() {
               type="search"
               value={search}
               onChange={(event) =>
-                setSearch(
-                  event.target.value
-                )
+                setSearch(event.target.value)
               }
-              placeholder="Search name, email, role..."
+              placeholder="Search employees..."
               aria-label="Search employees"
             />
           </div>
@@ -1425,15 +1163,11 @@ export default function Employees() {
                 All Departments
               </option>
 
-              {DEPARTMENTS.map(
-                (department) => (
-                  <option
-                    key={department}
-                  >
-                    {department}
-                  </option>
-                )
-              )}
+              {DEPARTMENTS.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
             </select>
 
             <select
@@ -1443,21 +1177,17 @@ export default function Employees() {
                   event.target.value
                 )
               }
-              aria-label="Filter employment status"
+              aria-label="Filter status"
             >
               <option value="All">
                 All Statuses
               </option>
 
-              {STATUSES.map(
-                (status) => (
-                  <option
-                    key={status}
-                  >
-                    {status}
-                  </option>
-                )
-              )}
+              {STATUSES.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -1467,14 +1197,10 @@ export default function Employees() {
             <thead>
               <tr>
                 <th>Employee</th>
-                <th>
-                  Role / Department
-                </th>
+                <th>Role / Department</th>
                 <th>Employment</th>
                 <th>Joining Date</th>
-                <th>
-                  Monthly Salary
-                </th>
+                <th>Monthly Salary</th>
                 <th>Projects</th>
                 <th>Tasks</th>
                 <th>Status</th>
@@ -1483,188 +1209,141 @@ export default function Employees() {
             </thead>
 
             <tbody>
-              {filteredEmployees.map(
-                (employee) => (
-                  <tr
-                    key={employee.id}
-                  >
-                    <td>
-                      <div className="employees__identity">
-                        <span className="employees__avatar">
-                          <UserRound
-                            size={19}
-                          />
-                        </span>
+              {filteredEmployees.map((employee) => (
+                <tr key={employee.id}>
+                  <td>
+                    <div className="employees__identity">
+                      <span className="employees__avatar">
+                        <UserRound size={19} />
+                      </span>
 
-                        <div>
-                          <strong>
-                            {employee.name}
-                          </strong>
-
-                          {employee.email && (
-                            <a
-                              href={`mailto:${employee.email}`}
-                            >
-                              <Mail
-                                size={12}
-                              />
-                              {
-                                employee.email
-                              }
-                            </a>
-                          )}
-
-                          {employee.phone && (
-                            <a
-                              href={`tel:${employee.phone}`}
-                            >
-                              <Phone
-                                size={12}
-                              />
-                              {
-                                employee.phone
-                              }
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    </td>
-
-                    <td>
-                      <div className="employees__role">
+                      <div>
                         <strong>
-                          {employee.role}
+                          {employee.name}
                         </strong>
 
-                        <small>
-                          <Building2
-                            size={12}
-                          />
-                          {
-                            employee.department
-                          }
-                        </small>
-                      </div>
-                    </td>
-
-                    <td>
-                      {
-                        employee.employmentType
-                      }
-                    </td>
-
-                    <td>
-                      <span className="employees__date">
-                        <CalendarDays
-                          size={14}
-                        />
-                        {formatDate(
-                          employee.joiningDate
+                        {employee.email && (
+                          <a
+                            href={`mailto:${employee.email}`}
+                          >
+                            <Mail size={12} />
+                            {employee.email}
+                          </a>
                         )}
-                      </span>
-                    </td>
 
-                    <td className="employees__salary">
-                      {employee.monthlySalary ===
-                      null
-                        ? "—"
-                        : money(
-                            employee.monthlySalary
-                          )}
-                    </td>
+                        {employee.phone && (
+                          <a
+                            href={`tel:${employee.phone}`}
+                          >
+                            <Phone size={12} />
+                            {employee.phone}
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </td>
 
-                    <td>
-                      <span className="employees__count">
-                        <BriefcaseBusiness
-                          size={14}
-                        />
-                        —
-                      </span>
-                    </td>
+                  <td>
+                    <div className="employees__role">
+                      <strong>
+                        {employee.role}
+                      </strong>
 
-                    <td>
-                      <span className="employees__count">
-                        <ClipboardList
-                          size={14}
-                        />
-                        —
-                      </span>
-                    </td>
+                      <small>
+                        <Building2 size={12} />
+                        {employee.department}
+                      </small>
+                    </div>
+                  </td>
 
-                    <td>
-                      <span
-                        className={`employees__badge employees__badge--${employee.status
-                          .toLowerCase()
-                          .replace(
-                            /\s+/g,
-                            "-"
-                          )}`}
-                      >
-                        {
-                          employee.status
-                        }
-                      </span>
-                    </td>
+                  <td>
+                    {employee.employmentType}
+                  </td>
 
-                    <td>
+                  <td>
+                    <span className="employees__date">
+                      <CalendarDays size={14} />
+                      {formatDate(
+                        employee.joiningDate
+                      )}
+                    </span>
+                  </td>
+
+                  <td className="employees__salary">
+                    {canViewStats &&
+                    employee.monthlySalary !== null
+                      ? money(employee.monthlySalary)
+                      : "—"}
+                  </td>
+
+                  <td>
+                    <span className="employees__count">
+                      <BriefcaseBusiness size={14} />
+                      —
+                    </span>
+                  </td>
+
+                  <td>
+                    <span className="employees__count">
+                      <ClipboardList size={14} />
+                      —
+                    </span>
+                  </td>
+
+                  <td>
+                    <span
+                      className={`employees__badge employees__badge--${employee.status
+                        .toLowerCase()
+                        .replace(/\s+/g, "-")}`}
+                    >
+                      {employee.status}
+                    </span>
+                  </td>
+
+                  <td>
+                    {canManageEmployees && (
                       <div className="employees__actions">
                         <button
                           type="button"
-                          onClick={() => {
-                            setEditingEmployee(
-                              employee
-                            );
-                            setModalOpen(
-                              true
-                            );
-                          }}
+                          onClick={() =>
+                            openEdit(employee)
+                          }
                           title="Edit employee"
                           aria-label={`Edit ${employee.name}`}
                           disabled={busy}
                         >
-                          <Pencil
-                            size={16}
-                          />
+                          <Pencil size={16} />
                         </button>
 
                         <button
                           type="button"
                           className="employees__delete"
-                          onClick={() => {
-                            void deleteEmployee(
-                              employee
-                            );
-                          }}
+                          onClick={() =>
+                            resignEmployee(employee)
+                          }
                           title="Mark as resigned"
-                          aria-label={`Mark ${employee.name} as resigned`}
+                          aria-label={`Resign ${employee.name}`}
                           disabled={
                             busy ||
                             [
                               "Resigned",
                               "Terminated",
-                            ].includes(
-                              employee.status
-                            )
+                            ].includes(employee.status)
                           }
                         >
-                          <Trash2
-                            size={16}
-                          />
+                          <Trash2 size={16} />
                         </button>
                       </div>
-                    </td>
-                  </tr>
-                )
-              )}
+                    )}
+                  </td>
+                </tr>
+              ))}
 
-              {filteredEmployees.length ===
-                0 && (
+              {filteredEmployees.length === 0 && (
                 <tr>
                   <td colSpan={9}>
                     <div className="employees__empty">
-                      <Users
-                        size={36}
-                      />
+                      <Users size={36} />
 
                       <h3>
                         {loading
@@ -1674,26 +1353,19 @@ export default function Employees() {
 
                       <p>
                         {loading
-                          ? "Fetching employee records from the backend."
-                          : employees.length ===
-                              0
-                            ? "Add your first employee to build the team directory."
-                            : "Try adjusting your search or filters."}
+                          ? "Fetching employee records."
+                          : "Try adjusting your filters or add an employee."}
                       </p>
 
-                      {!loading &&
-                        employees.length ===
-                          0 && (
+                      {canManageEmployees &&
+                        !loading &&
+                        employees.length === 0 && (
                           <button
                             type="button"
                             className="employees__button employees__button--primary"
-                            onClick={() => {
-                              void openAddEmployee();
-                            }}
+                            onClick={openAdd}
                           >
-                            <Plus
-                              size={16}
-                            />
+                            <Plus size={16} />
                             Add Employee
                           </button>
                         )}
@@ -1706,29 +1378,17 @@ export default function Employees() {
         </div>
 
         <div className="employees__table-footer">
-          Showing{" "}
-          {
-            filteredEmployees.length
-          }{" "}
-          of {totalEmployees}{" "}
-          employees
+          Showing {filteredEmployees.length} of{" "}
+          {employees.length} employees
         </div>
       </section>
 
-      {modalOpen && (
+      {canManageEmployees && modalOpen && (
         <EmployeeModal
-          employee={
-            editingEmployee
-          }
-          availableUsers={
-            availableUsers
-          }
-          onClose={
-            closeModal
-          }
-          onSave={
-            saveEmployee
-          }
+          employee={editingEmployee}
+          availableUsers={availableUsers}
+          onClose={closeModal}
+          onSave={saveEmployee}
         />
       )}
     </div>

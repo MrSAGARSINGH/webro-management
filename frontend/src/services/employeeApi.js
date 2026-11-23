@@ -40,21 +40,34 @@ async function request(
     headers = {},
   } = {}
 ) {
-  const response = await fetch(`${API_URL}${path}`, {
-    method,
-    credentials: "include",
-    signal,
-    headers: {
-      Accept: "application/json",
+  let response;
+
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      method,
+      credentials: "include",
+      signal,
+      headers: {
+        Accept: "application/json",
+        ...(body !== undefined
+          ? { "Content-Type": "application/json" }
+          : {}),
+        ...headers,
+      },
       ...(body !== undefined
-        ? { "Content-Type": "application/json" }
+        ? { body: JSON.stringify(body) }
         : {}),
-      ...headers,
-    },
-    ...(body !== undefined
-      ? { body: JSON.stringify(body) }
-      : {}),
-  });
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw error;
+    }
+
+    throw new Error(
+      "Unable to connect to the WEBRO backend.",
+      { cause: error }
+    );
+  }
 
   return parseResponse(response);
 }
@@ -144,10 +157,7 @@ export function toEmployeeISODate(value) {
     throw new Error("Invalid date value");
   }
 
-  // Already a valid ISO datetime
-  if (
-    /^\d{4}-\d{2}-\d{2}T/.test(value)
-  ) {
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) {
     const date = new Date(value);
 
     if (Number.isNaN(date.getTime())) {

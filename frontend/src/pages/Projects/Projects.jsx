@@ -1,11 +1,5 @@
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
-
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Search,
@@ -23,16 +17,18 @@ import {
   Building2,
   Clock3,
   Layers3,
+  RefreshCw,
 } from "lucide-react";
 
 import { projectApi } from "../../services/projectApi.js";
-import { employeeApi } from "../../services/employeeApi.js";
-
 import "./Projects.scss";
 
-// ======================================
-// Constants
-// ======================================
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api"
+).replace(/\/+$/, "");
+
+const PAGE_SIZE = 10;
+const OBJECT_ID = /^[a-f\d]{24}$/i;
 
 const STATUSES = [
   "Planning",
@@ -43,14 +39,9 @@ const STATUSES = [
   "Cancelled",
 ];
 
-const PRIORITIES = [
-  "Low",
-  "Medium",
-  "High",
-  "Urgent",
-];
+const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 
-const SERVICES = [
+const PROJECT_TYPES = [
   "Website Development",
   "E-commerce Development",
   "Web Application",
@@ -60,245 +51,240 @@ const SERVICES = [
   "Other",
 ];
 
-const PAGE_SIZE = 100;
-
 const EMPTY_FORM = {
   name: "",
+  description: "",
   client: "",
-  service: "Website Development",
-  assignedTo: "",
-  status: "Planning",
+  type: "Website Development",
   priority: "Medium",
-  progress: "0",
-  budget: "",
+  projectManager: "",
+  assignedTo: [],
   startDate: "",
   deadline: "",
-  description: "",
+  budget: "",
+  progress: "0",
+  repositoryUrl: "",
+  liveUrl: "",
+  notes: "",
 };
 
-// ======================================
-// Helpers
-// ======================================
+const getId = (value) =>
+  typeof value === "string"
+    ? value
+    : value?._id || value?.id || "";
 
-const getId = (value) => {
-  if (typeof value === "string") return value;
-
-  return value?._id || value?.id || "";
-};
-
-const getErrorMessage = (error) =>
-  error instanceof Error
-    ? error.message
-    : "Something went wrong.";
-
-const currency = (value) =>
+const formatMoney = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
 
-const pad = (value) =>
-  String(value).padStart(2, "0");
+const dateOnly = (value) =>
+  value ? String(value).slice(0, 10) : "";
 
-function todayKey() {
-  const date = new Date();
+const toISODate = (value) =>
+  value ? `${value}T00:00:00.000Z` : null;
 
-  return `${date.getFullYear()}-${pad(
-    date.getMonth() + 1
-  )}-${pad(date.getDate())}`;
-}
-
-function dateKey(value) {
-  if (!value) return "";
+const formatDate = (value) => {
+  if (!value) return "Not set";
 
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return "";
+    return "Not set";
   }
-
-  return date.toISOString().slice(0, 10);
-}
-
-function toISO(value) {
-  return value
-    ? `${value}T00:00:00.000Z`
-    : null;
-}
-
-function formatDate(value) {
-  const key = dateKey(value);
-
-  if (!key) return "Not set";
 
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
     timeZone: "UTC",
-  }).format(new Date(`${key}T00:00:00.000Z`));
-}
+  }).format(date);
+};
 
-function isOverdue(project, today) {
-  return (
-    Boolean(project.deadline) &&
-    project.deadline < today &&
-    !["Completed", "Cancelled"].includes(
-      project.status
-    )
+const getToday = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+};
+
+const isOverdue = (project) =>
+  Boolean(
+    project.deadline &&
+      dateOnly(project.deadline) < getToday() &&
+      !["Completed", "Cancelled"].includes(project.status)
   );
-}
 
-function statusClass(value) {
-  return String(value || "")
+const classSuffix = (value) =>
+  String(value || "")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-}
+    .replace(/[^a-z0-9]+/g, "-");
 
-function mapProject(project) {
-  const client =
-    typeof project.client === "object"
-      ? project.client
-      : null;
+const errorMessage = (error) => {
+  const details = error?.details;
 
-  const assigned = Array.isArray(project.assignedTo)
-    ? project.assignedTo
-    : [];
-
-  return {
-    id: getId(project),
-    name: project.name || "",
-    client: getId(project.client),
-    clientName: client?.name || "Unknown Client",
-    business: client?.company || "",
-    service: project.type || "Other",
-    assignedIds: assigned.map(getId),
-    assignedTo: assigned
-      .map((user) =>
-        typeof user === "object"
-          ? user.name
-          : ""
-      )
+  if (Array.isArray(details) && details.length > 0) {
+    return details
+      .map((item) => item.message)
       .filter(Boolean)
-      .join(", "),
-    status: project.status || "Planning",
-    priority: project.priority || "Medium",
-    progress: project.progress ?? 0,
-    budget: project.budget ?? 0,
-    startDate: dateKey(project.startDate),
-    deadline: dateKey(project.deadline),
-    description: project.description || "",
-    notes: project.notes || "",
-    projectManager: getId(project.projectManager),
-    repositoryUrl: project.repositoryUrl || "",
-    liveUrl: project.liveUrl || "",
-    milestones: project.milestones || [],
-  };
-}
+      .join(", ");
+  }
 
-// ======================================
-// Read Client Directory
-// ======================================
+  return error?.message || "Something went wrong.";
+};
 
-const API_URL = (
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:5000/api"
-).replace(/\/+$/, "");
+const isValidUrl = (value) => {
+  if (!value) return true;
 
-async function getClients() {
-  const clients = [];
-  let page = 1;
-  let totalPages = 1;
+  try {
+    const url = new URL(value);
 
-  do {
-    const response = await fetch(
-      `${API_URL}/clients?page=${page}&limit=${PAGE_SIZE}`,
-      {
-        credentials: "include",
-        headers: {
-          Accept: "application/json",
-        },
-      }
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      url.hostname.includes(".")
     );
+  } catch {
+    return false;
+  }
+};
 
-    const result = await response
-      .json()
-      .catch(() => null);
+async function getOptions(path, signal) {
+  let response;
 
-    if (!response.ok || result?.success !== true) {
-      throw new Error(
-        result?.message ||
-          "Unable to load clients."
-      );
-    }
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      method: "GET",
+      credentials: "include",
+      signal,
+      headers: {
+        Accept: "application/json",
+      },
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
 
-    clients.push(...(result.clients || []));
+    throw new Error("Unable to connect to backend.");
+  }
 
-    totalPages =
-      result.pagination?.totalPages || 1;
+  const result = await response.json().catch(() => null);
 
-    page += 1;
-  } while (page <= totalPages);
+  if (!response.ok || result?.success !== true) {
+    throw new Error(
+      result?.message || `Request failed (${response.status})`
+    );
+  }
 
-  return clients;
+  return result;
 }
 
-async function getAssignableUsers() {
-  const users = [];
+async function getAllOptions(path, key, signal) {
+  const all = [];
   let page = 1;
-  let totalPages = 1;
 
-  do {
-    const result = await employeeApi.getUsers({
-      page,
-      limit: PAGE_SIZE,
-      isActive: "true",
+  while (true) {
+    const query = new URLSearchParams({
+      page: String(page),
+      limit: "100",
     });
 
-    users.push(...(result.users || []));
+    const response = await getOptions(
+      `${path}?${query.toString()}`,
+      signal
+    );
 
-    totalPages =
-      result.pagination?.totalPages || 1;
+    const records = Array.isArray(response[key])
+      ? response[key]
+      : [];
+
+    all.push(...records);
+
+    const totalPages = Number(response.pagination?.totalPages || 1);
+
+    if (page >= totalPages || records.length === 0) {
+      break;
+    }
 
     page += 1;
-  } while (page <= totalPages);
+  }
 
-  return users;
+  return all;
 }
 
-// ======================================
-// Project Modal
-// ======================================
-
-function ProjectModal({
-  project,
-  clients,
-  users,
-  onClose,
-  onSave,
-}) {
-  const isEditing = Boolean(project);
-
-  const [form, setForm] = useState(() =>
-    project
+function ProjectModal({ project, onClose, onSave }) {
+  const [form, setForm] = useState(() => ({
+    ...EMPTY_FORM,
+    ...(project
       ? {
-          ...EMPTY_FORM,
-          ...project,
-          assignedTo:
-            project.assignedIds?.[0] || "",
+          name: project.name || "",
+          description: project.description || "",
+          client: getId(project.client),
+          type: project.type || PROJECT_TYPES[0],
+          priority: project.priority || "Medium",
+          projectManager: getId(project.projectManager),
+          assignedTo: Array.isArray(project.assignedTo)
+            ? project.assignedTo.map(getId).filter(Boolean)
+            : [],
+          startDate: dateOnly(project.startDate),
+          deadline: dateOnly(project.deadline),
+          budget: String(project.budget ?? 0),
           progress: String(project.progress ?? 0),
-          budget: String(project.budget ?? ""),
+          repositoryUrl: project.repositoryUrl || "",
+          liveUrl: project.liveUrl || "",
+          notes: project.notes || "",
         }
-      : {
-          ...EMPTY_FORM,
-          startDate: todayKey(),
-        }
-  );
+      : {}),
+  }));
 
+  const [clients, setClients] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [optionsError, setOptionsError] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        setLoadingOptions(true);
+        setOptionsError("");
+
+        const [clientList, employeeList] = await Promise.all([
+          getAllOptions("/clients", "clients", controller.signal),
+          getAllOptions("/employees", "employees", controller.signal),
+        ]);
+
+        if (controller.signal.aborted) return;
+
+        setClients(clientList);
+        setEmployees(
+          employeeList.filter(
+            (employee) =>
+              employee.user &&
+              employee.status === "Active" &&
+              employee.user.isActive !== false
+          )
+        );
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setOptionsError(errorMessage(err));
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoadingOptions(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const handleEscape = (event) => {
@@ -307,20 +293,13 @@ function ProjectModal({
       }
     };
 
-    document.addEventListener(
-      "keydown",
-      handleEscape
-    );
+    document.addEventListener("keydown", handleEscape);
 
-    return () => {
-      document.removeEventListener(
-        "keydown",
-        handleEscape
-      );
-    };
+    return () =>
+      document.removeEventListener("keydown", handleEscape);
   }, [onClose, saving]);
 
-  const handleChange = (event) => {
+  const change = (event) => {
     const { name, value } = event.target;
 
     setForm((previous) => ({
@@ -331,36 +310,40 @@ function ProjectModal({
     setError("");
   };
 
-  const handleSubmit = async (event) => {
+  const toggleAssignment = (userId, checked) => {
+    setForm((previous) => ({
+      ...previous,
+      assignedTo: checked
+        ? [...new Set([...previous.assignedTo, userId])]
+        : previous.assignedTo.filter((id) => id !== userId),
+    }));
+  };
+
+  const submit = async (event) => {
     event.preventDefault();
 
-    if (saving) return;
+    if (saving || loadingOptions) return;
 
     const name = form.name.trim();
-
-    if (name.length < 3) {
-      setError(
-        "Project name must contain at least 3 characters."
-      );
-      return;
-    }
-
-    if (!form.client) {
-      setError("Please select a client.");
-      return;
-    }
-
     const progress = Number(form.progress);
     const budget = Number(form.budget || 0);
+
+    if (name.length < 3 || name.length > 200) {
+      setError("Project name must contain 3–200 characters.");
+      return;
+    }
+
+    if (!OBJECT_ID.test(form.client)) {
+      setError("Select a valid client.");
+      return;
+    }
 
     if (
       !Number.isInteger(progress) ||
       progress < 0 ||
       progress > 100
     ) {
-      setError(
-        "Project progress must be between 0 and 100."
-      );
+      setError("Progress must be between 0 and 100.");
       return;
     }
 
@@ -378,75 +361,52 @@ function ProjectModal({
       form.deadline &&
       form.deadline < form.startDate
     ) {
-      setError(
-        "Deadline cannot be earlier than start date."
-      );
+      setError("Deadline cannot be earlier than start date.");
       return;
     }
 
     if (
-      form.status === "Completed" &&
-      progress !== 100
+      !isValidUrl(form.repositoryUrl.trim()) ||
+      !isValidUrl(form.liveUrl.trim())
     ) {
-      setError(
-        "Completed projects must have 100% progress."
-      );
+      setError("Repository and live URLs must be valid HTTP(S) URLs.");
       return;
     }
 
-    if (
-      progress === 100 &&
-      form.status !== "Completed"
-    ) {
-      setError(
-        "Set status to Completed when progress reaches 100%."
-      );
+    if (form.assignedTo.length > 100) {
+      setError("Maximum 100 employees can be assigned.");
       return;
     }
 
-    const assignedIds = form.assignedTo
-      ? [form.assignedTo]
-      : [];
-
-    // Preserve additional assignments when editing.
-    // The existing UI exposes only one assignment field.
-    const previousIds =
-      project?.assignedIds || [];
-
-    const additionalIds = previousIds.filter(
-      (id) =>
-        id !== form.assignedTo &&
-        id !== previousIds[0]
-    );
+    if (optionsError) {
+      setError(optionsError);
+      return;
+    }
 
     const payload = {
       name,
-      client: form.client,
-      type: form.service,
-      priority: form.priority,
-      assignedTo: [
-        ...new Set([
-          ...assignedIds,
-          ...additionalIds,
-        ]),
-      ],
-      progress,
-      budget,
-      startDate: toISO(form.startDate),
-      deadline: toISO(form.deadline),
       description: form.description.trim(),
+      client: form.client,
+      type: form.type,
+      priority: form.priority,
+      projectManager: form.projectManager || null,
+      assignedTo: form.assignedTo,
+      startDate: toISODate(form.startDate),
+      deadline: toISODate(form.deadline),
+      budget,
+      progress,
+      repositoryUrl: form.repositoryUrl.trim(),
+      liveUrl: form.liveUrl.trim(),
+      notes: form.notes.trim(),
     };
 
     try {
       setSaving(true);
       setError("");
 
-      await onSave({
-        payload,
-        status: form.status,
-      });
+      await onSave(payload);
     } catch (err) {
-      setError(getErrorMessage(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -473,14 +433,9 @@ function ProjectModal({
         <div className="projects__modal-header">
           <div>
             <h2 id="project-modal-title">
-              {isEditing
-                ? "Edit Project"
-                : "Create New Project"}
+              {project ? "Edit Project" : "Create New Project"}
             </h2>
-
-            <p>
-              Manage project delivery and ownership.
-            </p>
+            <p>Manage project details and team assignments.</p>
           </div>
 
           <button
@@ -494,120 +449,59 @@ function ProjectModal({
           </button>
         </div>
 
-        <form
-          className="projects__form"
-          onSubmit={handleSubmit}
-        >
+        <form className="projects__form" onSubmit={submit}>
           <div className="projects__form-grid">
             <label className="projects__form-full">
               Project Name *
               <input
                 name="name"
                 value={form.name}
-                onChange={handleChange}
-                placeholder="Restaurant Website Development"
+                onChange={change}
+                placeholder="Project name"
+                minLength={3}
                 maxLength={200}
                 required
               />
             </label>
 
             <label>
-              Client Name *
+              Client *
               <select
                 name="client"
                 value={form.client}
-                onChange={handleChange}
+                onChange={change}
+                disabled={loadingOptions || Boolean(optionsError)}
                 required
               >
-                <option value="">
-                  Select Client
-                </option>
+                <option value="">Select client</option>
 
                 {clients.map((client) => (
-                  <option
-                    key={getId(client)}
-                    value={getId(client)}
-                  >
+                  <option key={getId(client)} value={getId(client)}>
                     {client.name}
                   </option>
                 ))}
-              </select>
-            </label>
 
-            <label>
-              Business / Company
-              <input
-                value={
-                  clients.find(
-                    (client) =>
-                      getId(client) === form.client
-                  )?.company || ""
-                }
-                placeholder="Business name"
-                readOnly
-              />
-            </label>
-
-            <label>
-              Service
-              <select
-                name="service"
-                value={form.service}
-                onChange={handleChange}
-              >
-                {SERVICES.map((service) => (
-                  <option
-                    key={service}
-                    value={service}
-                  >
-                    {service}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Assigned Employee
-              <select
-                name="assignedTo"
-                value={form.assignedTo}
-                onChange={handleChange}
-              >
-                <option value="">
-                  Unassigned
-                </option>
-
-                {users
-                  .filter(
-                    (user) =>
-                      user.role === "employee" ||
-                      user.role === "manager"
-                  )
-                  .map((user) => (
-                    <option
-                      key={getId(user)}
-                      value={getId(user)}
-                    >
-                      {user.name}
+                {form.client &&
+                  !clients.some(
+                    (client) => getId(client) === form.client
+                  ) && (
+                    <option value={form.client}>
+                      Previously selected client
                     </option>
-                  ))}
+                  )}
               </select>
             </label>
 
             <label>
-              Project Status
+              Project Type
               <select
-                name="status"
-                value={form.status}
-                onChange={handleChange}
-                disabled={!isEditing}
+                name="type"
+                value={form.type}
+                onChange={change}
               >
-                {STATUSES.map((status) => (
-                  <option
-                    key={status}
-                    value={status}
-                  >
-                    {status}
+                {PROJECT_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
                   </option>
                 ))}
               </select>
@@ -618,17 +512,114 @@ function ProjectModal({
               <select
                 name="priority"
                 value={form.priority}
-                onChange={handleChange}
+                onChange={change}
               >
                 {PRIORITIES.map((priority) => (
-                  <option
-                    key={priority}
-                    value={priority}
-                  >
+                  <option key={priority} value={priority}>
                     {priority}
                   </option>
                 ))}
               </select>
+            </label>
+
+            <label>
+              Project Manager
+              <select
+                name="projectManager"
+                value={form.projectManager}
+                onChange={change}
+                disabled={loadingOptions || Boolean(optionsError)}
+              >
+                <option value="">No manager assigned</option>
+
+                {employees
+                  .filter((employee) =>
+                    ["admin", "manager"].includes(
+                      employee.user?.role
+                    )
+                  )
+                  .map((employee) => (
+                    <option
+                      key={getId(employee.user)}
+                      value={getId(employee.user)}
+                    >
+                      {employee.user.name}
+                    </option>
+                  ))}
+
+                {form.projectManager &&
+                  !employees.some(
+                    (employee) =>
+                      getId(employee.user) === form.projectManager
+                  ) && (
+                    <option value={form.projectManager}>
+                      Previously selected manager
+                    </option>
+                  )}
+              </select>
+            </label>
+
+            <label className="projects__form-full">
+              Assigned Employees
+              <div
+                style={{
+                  maxHeight: 170,
+                  overflowY: "auto",
+                  padding: "8px 0",
+                }}
+              >
+                {employees.map((employee) => {
+                  const userId = getId(employee.user);
+
+                  if (!userId) return null;
+
+                  return (
+                    <label
+                      key={userId}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        marginBottom: 8,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={form.assignedTo.includes(userId)}
+                        onChange={(event) =>
+                          toggleAssignment(
+                            userId,
+                            event.target.checked
+                          )
+                        }
+                        style={{ width: "auto" }}
+                      />
+
+                      <span>
+                        {employee.user.name ||
+                          employee.user.email}
+                      </span>
+                    </label>
+                  );
+                })}
+
+                {!loadingOptions && employees.length === 0 && (
+                  <small>No active employees available.</small>
+                )}
+              </div>
+            </label>
+
+            <label>
+              Project Budget (₹)
+              <input
+                name="budget"
+                type="number"
+                min="0"
+                max="999999999999"
+                step="0.01"
+                value={form.budget}
+                onChange={change}
+              />
             </label>
 
             <label>
@@ -640,22 +631,8 @@ function ProjectModal({
                 max="100"
                 step="1"
                 value={form.progress}
-                onChange={handleChange}
+                onChange={change}
                 required
-              />
-            </label>
-
-            <label>
-              Project Budget (₹)
-              <input
-                name="budget"
-                type="number"
-                min="0"
-                max="999999999999"
-                step="1"
-                value={form.budget}
-                onChange={handleChange}
-                placeholder="30000"
               />
             </label>
 
@@ -665,7 +642,7 @@ function ProjectModal({
                 name="startDate"
                 type="date"
                 value={form.startDate}
-                onChange={handleChange}
+                onChange={change}
               />
             </label>
 
@@ -675,38 +652,65 @@ function ProjectModal({
                 name="deadline"
                 type="date"
                 value={form.deadline}
-                onChange={handleChange}
+                onChange={change}
               />
             </label>
 
             <label className="projects__form-full">
-              Project Description
+              Repository URL
+              <input
+                name="repositoryUrl"
+                type="url"
+                value={form.repositoryUrl}
+                onChange={change}
+                placeholder="https://github.com/..."
+                maxLength={2048}
+              />
+            </label>
+
+            <label className="projects__form-full">
+              Live Website URL
+              <input
+                name="liveUrl"
+                type="url"
+                value={form.liveUrl}
+                onChange={change}
+                placeholder="https://example.com"
+                maxLength={2048}
+              />
+            </label>
+
+            <label className="projects__form-full">
+              Description
               <textarea
                 name="description"
                 value={form.description}
-                onChange={handleChange}
-                placeholder="Scope, requirements, deliverables and milestones..."
-                rows={4}
+                onChange={change}
+                rows={3}
+                maxLength={5000}
+              />
+            </label>
+
+            <label className="projects__form-full">
+              Internal Notes
+              <textarea
+                name="notes"
+                value={form.notes}
+                onChange={change}
+                rows={3}
                 maxLength={5000}
               />
             </label>
           </div>
 
-          {clients.length === 0 && (
-            <p
-              className="projects__form-error"
-              role="status"
-            >
-              No clients found. Create a client
-              before creating a project.
+          {optionsError && (
+            <p className="projects__form-error" role="alert">
+              {optionsError}
             </p>
           )}
 
           {error && (
-            <p
-              className="projects__form-error"
-              role="alert"
-            >
+            <p className="projects__form-error" role="alert">
               {error}
             </p>
           )}
@@ -726,12 +730,13 @@ function ProjectModal({
               className="projects__button projects__button--primary"
               disabled={
                 saving ||
-                clients.length === 0
+                loadingOptions ||
+                Boolean(optionsError)
               }
             >
               {saving
                 ? "Saving..."
-                : isEditing
+                : project
                   ? "Save Changes"
                   : "Create Project"}
             </button>
@@ -742,410 +747,245 @@ function ProjectModal({
   );
 }
 
-// ======================================
-// Projects Page
-// ======================================
+export default function Projects({ user }) {
+  const canManage =
+    user?.role === "admin" ||
+    user?.role === "manager";
 
-export default function Projects() {
-  const [projects, setProjects] =
-    useState([]);
+  const canDelete = user?.role === "admin";
 
-  const [clients, setClients] =
-    useState([]);
+  const [projects, setProjects] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [pagination, setPagination] = useState({
+    total: 0,
+    totalPages: 0,
+  });
 
-  const [users, setUsers] =
-    useState([]);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [priorityFilter, setPriorityFilter] = useState("All");
 
-  const [search, setSearch] =
-    useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState("");
 
-  const [statusFilter, setStatusFilter] =
-    useState("All");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const [priorityFilter, setPriorityFilter] =
-    useState("All");
-
-  const [modalOpen, setModalOpen] =
-    useState(false);
-
-  const [editingProject, setEditingProject] =
-    useState(null);
-
-  const [storageError, setStorageError] =
-    useState("");
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [busy, setBusy] =
-    useState(false);
-
-  const [today, setToday] =
-    useState(todayKey);
-
-  const [refreshKey, setRefreshKey] =
-    useState(0);
-
-  const refreshProjects = useCallback(() => {
-    setRefreshKey((value) => value + 1);
+  const refresh = useCallback(() => {
+    setRefreshKey((previous) => previous + 1);
   }, []);
 
-  // ====================================
-  // Load Projects from MongoDB
-  // ====================================
-
   useEffect(() => {
-    let cancelled = false;
+    let active = true;
 
-    const loadProjects = async () => {
+    async function loadProjects() {
       try {
         setLoading(true);
-        setStorageError("");
+        setError("");
 
-        const allProjects = [];
-        let page = 1;
-        let totalPages = 1;
+        const response = await projectApi.getAll({
+          page,
+          limit: PAGE_SIZE,
+          search: search.trim(),
+          status:
+            statusFilter === "All" ? "" : statusFilter,
+          priority:
+            priorityFilter === "All" ? "" : priorityFilter,
+        });
 
-        do {
-          const result = await projectApi.getAll({
-            page,
-            limit: PAGE_SIZE,
-          });
+        if (!active) return;
 
-          if (cancelled) return;
+        setProjects(
+          Array.isArray(response.projects)
+            ? response.projects
+            : []
+        );
 
-          allProjects.push(
-            ...(result.projects || [])
-          );
-
-          totalPages =
-            result.pagination?.totalPages || 1;
-
-          page += 1;
-        } while (page <= totalPages);
-
-        if (!cancelled) {
-          setProjects(
-            allProjects.map(mapProject)
-          );
-        }
+        setPagination(
+          response.pagination || {
+            total: 0,
+            totalPages: 0,
+          }
+        );
       } catch (err) {
-        if (!cancelled) {
-          setStorageError(
-            getErrorMessage(err)
-          );
+        if (active) {
+          setError(errorMessage(err));
         }
       } finally {
-        if (!cancelled) {
+        if (active) {
           setLoading(false);
         }
       }
-    };
+    }
 
     void loadProjects();
 
     return () => {
-      cancelled = true;
+      active = false;
+    };
+  }, [
+    page,
+    search,
+    statusFilter,
+    priorityFilter,
+    refreshKey,
+  ]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadStats() {
+      try {
+        const response = await projectApi.getStats();
+
+        if (active) {
+          setStats(response.stats || null);
+        }
+      } catch (err) {
+        if (active) {
+          setError(errorMessage(err));
+        }
+      }
+    }
+
+    void loadStats();
+
+    return () => {
+      active = false;
     };
   }, [refreshKey]);
 
-  // ====================================
-  // Update Today
-  // ====================================
+  const cards = useMemo(
+    () => [
+      {
+        label: "Total Projects",
+        value: stats?.total ?? "—",
+        icon: FolderKanban,
+      },
+      {
+        label: "In Progress",
+        value: stats?.inProgress ?? "—",
+        icon: PlayCircle,
+      },
+      {
+        label: "Completed",
+        value: stats?.completed ?? "—",
+        icon: CheckCircle2,
+      },
+      {
+        label: "Overdue",
+        value: stats?.overdue ?? "—",
+        icon: AlertTriangle,
+      },
+      {
+        label: "Total Budget",
+        value: stats
+          ? formatMoney(stats.totalBudget)
+          : "—",
+        icon: IndianRupee,
+      },
+    ],
+    [stats]
+  );
 
-  useEffect(() => {
-    const refresh = () =>
-      setToday(todayKey());
+  const openCreate = () => {
+    if (!canManage || busyId) return;
 
-    const interval = window.setInterval(
-      refresh,
-      60_000
-    );
-
-    window.addEventListener(
-      "focus",
-      refresh
-    );
-
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener(
-        "focus",
-        refresh
-      );
-    };
-  }, []);
-
-  // ====================================
-  // Load Form Dependencies
-  // ====================================
-
-  const loadFormData = async () => {
-    const [clientData, userData] =
-      await Promise.all([
-        getClients(),
-        getAssignableUsers(),
-      ]);
-
-    setClients(clientData);
-    setUsers(userData);
+    setEditingProject(null);
+    setModalOpen(true);
   };
 
-  const openAdd = async () => {
-    if (busy) return;
+  const openEdit = (project) => {
+    if (!canManage || busyId) return;
 
-    try {
-      setBusy(true);
-      setStorageError("");
-
-      await loadFormData();
-
-      setEditingProject(null);
-      setModalOpen(true);
-    } catch (err) {
-      setStorageError(
-        getErrorMessage(err)
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const openEdit = async (project) => {
-    if (busy) return;
-
-    try {
-      setBusy(true);
-      setStorageError("");
-
-      await loadFormData();
-
-      setEditingProject(project);
-      setModalOpen(true);
-    } catch (err) {
-      setStorageError(
-        getErrorMessage(err)
-      );
-    } finally {
-      setBusy(false);
-    }
+    setEditingProject(project);
+    setModalOpen(true);
   };
 
   const closeModal = () => {
-    if (busy) return;
-
     setModalOpen(false);
     setEditingProject(null);
   };
 
-  // ====================================
-  // Create / Update Project
-  // ====================================
-
-  const saveProject = async ({
-    payload,
-    status,
-  }) => {
-    setBusy(true);
-
-    try {
-      if (editingProject) {
-        const id = editingProject.id;
-
-        await projectApi.update(
-          id,
-          payload
-        );
-
-        if (
-          status !== editingProject.status
-        ) {
-          await projectApi.updateStatus(
-            id,
-            status
-          );
-        }
-      } else {
-        await projectApi.create({
-          ...payload,
-          projectManager: null,
-          milestones: [],
-          repositoryUrl: "",
-          liveUrl: "",
-          notes: "",
-        });
-      }
-
-      setModalOpen(false);
-      setEditingProject(null);
-      refreshProjects();
-    } catch (err) {
-      refreshProjects();
-      throw err;
-    } finally {
-      setBusy(false);
+  const saveProject = async (payload) => {
+    if (!canManage) {
+      throw new Error("Admin or Manager access required.");
     }
+
+    if (editingProject) {
+      await projectApi.update(
+        getId(editingProject),
+        payload
+      );
+    } else {
+      await projectApi.create(payload);
+    }
+
+    closeModal();
+    refresh();
   };
 
-  // ====================================
-  // Delete Project
-  // ====================================
-
-  const deleteProject = async (project) => {
+  const changeStatus = async (project, status) => {
     if (
-      !window.confirm(
-        `Delete project "${project.name}"? This action cannot be undone.`
-      )
+      !canManage ||
+      busyId ||
+      project.status === status
     ) {
       return;
     }
 
+    const confirmed = window.confirm(
+      `Change "${project.name}" status to "${status}"?`
+    );
+
+    if (!confirmed) return;
+
     try {
-      setBusy(true);
-      setStorageError("");
+      setBusyId(getId(project));
+      setError("");
 
-      await projectApi.remove(project.id);
-
-      refreshProjects();
-    } catch (err) {
-      setStorageError(
-        getErrorMessage(err)
+      await projectApi.updateStatus(
+        getId(project),
+        status
       );
+
+      refresh();
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
-      setBusy(false);
+      setBusyId("");
     }
   };
 
-  // ====================================
-  // Statistics
-  // ====================================
+  const deleteProject = async (project) => {
+    if (!canDelete || busyId) return;
 
-  const stats = useMemo(() => {
-    return {
-      total: projects.length,
+    const confirmed = window.confirm(
+      `Permanently delete "${project.name}"? This cannot be undone.`
+    );
 
-      active: projects.filter(
-        (project) =>
-          project.status === "In Progress"
-      ).length,
+    if (!confirmed) return;
 
-      completed: projects.filter(
-        (project) =>
-          project.status === "Completed"
-      ).length,
+    try {
+      setBusyId(getId(project));
+      setError("");
 
-      overdue: projects.filter(
-        (project) =>
-          isOverdue(project, today)
-      ).length,
+      await projectApi.remove(getId(project));
 
-      budget: projects
-        .filter(
-          (project) =>
-            project.status !== "Cancelled"
-        )
-        .reduce(
-          (sum, project) =>
-            sum +
-            (Number(project.budget) || 0),
-          0
-        ),
-    };
-  }, [projects, today]);
-
-  // ====================================
-  // Search and Filters
-  // ====================================
-
-  const filteredProjects = useMemo(() => {
-    const query = search
-      .trim()
-      .toLowerCase();
-
-    return projects
-      .filter((project) => {
-        const matchesSearch = [
-          project.name,
-          project.clientName,
-          project.business,
-          project.service,
-          project.assignedTo,
-          project.description,
-        ].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query)
-        );
-
-        return (
-          matchesSearch &&
-          (statusFilter === "All" ||
-            project.status === statusFilter) &&
-          (priorityFilter === "All" ||
-            project.priority === priorityFilter)
-        );
-      })
-      .sort((a, b) => {
-        const aOverdue = isOverdue(a, today);
-        const bOverdue = isOverdue(b, today);
-
-        if (aOverdue !== bOverdue) {
-          return aOverdue ? -1 : 1;
-        }
-
-        const aDeadline =
-          a.deadline || "9999-12-31";
-
-        const bDeadline =
-          b.deadline || "9999-12-31";
-
-        return aDeadline.localeCompare(
-          bDeadline
-        );
-      });
-  }, [
-    projects,
-    search,
-    statusFilter,
-    priorityFilter,
-    today,
-  ]);
-
-  // ====================================
-  // Dashboard Cards
-  // ====================================
-
-  const cards = [
-    {
-      label: "Total Projects",
-      value: stats.total,
-      icon: FolderKanban,
-    },
-    {
-      label: "In Progress",
-      value: stats.active,
-      icon: PlayCircle,
-    },
-    {
-      label: "Completed",
-      value: stats.completed,
-      icon: CheckCircle2,
-    },
-    {
-      label: "Overdue Projects",
-      value: stats.overdue,
-      icon: AlertTriangle,
-    },
-    {
-      label: "Total Project Budget",
-      value: currency(stats.budget),
-      icon: IndianRupee,
-    },
-  ];
-
-  // ====================================
-  // Existing UI
-  // ====================================
+      if (projects.length === 1 && page > 1) {
+        setPage((previous) => previous - 1);
+      } else {
+        refresh();
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusyId("");
+    }
+  };
 
   return (
     <div className="projects">
@@ -1158,46 +998,43 @@ export default function Projects() {
           <h1>Project Management</h1>
 
           <p>
-            Monitor project delivery,
-            ownership, deadlines and budgets.
+            Manage projects, team assignments,
+            deadlines and delivery progress.
           </p>
         </div>
 
-        <button
-          type="button"
-          className="projects__button projects__button--primary"
-          onClick={() => {
-            void openAdd();
-          }}
-          disabled={busy}
-        >
-          <Plus size={18} />
-          New Project
-        </button>
+        {canManage && (
+          <button
+            type="button"
+            className="projects__button projects__button--primary"
+            onClick={openCreate}
+            disabled={Boolean(busyId)}
+          >
+            <Plus size={18} />
+            New Project
+          </button>
+        )}
       </div>
 
-      {storageError && (
-        <div
-          className="projects__error"
-          role="alert"
-        >
-          {storageError}
+      {error && (
+        <div className="projects__error" role="alert">
+          <span>{error}</span>
+
+          <button type="button" onClick={refresh}>
+            <RefreshCw size={15} />
+            Retry
+          </button>
         </div>
       )}
 
       <div className="projects__stats">
-        {cards.map(
-          ({ label, value, icon: Icon }) => (
-            <div
-              className="projects__stat"
-              key={label}
-            >
-              <Icon size={21} />
-              <span>{label}</span>
-              <strong>{value}</strong>
-            </div>
-          )
-        )}
+        {cards.map(({ label, value, icon: Icon }) => (
+          <div className="projects__stat" key={label}>
+            <Icon size={21} />
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
       </div>
 
       <section className="projects__panel">
@@ -1209,8 +1046,7 @@ export default function Projects() {
             </h2>
 
             <p>
-              Manage active and completed
-              project work.
+              Track your ongoing and completed projects.
             </p>
           </div>
         </div>
@@ -1222,10 +1058,11 @@ export default function Projects() {
             <input
               type="search"
               value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
-              placeholder="Search project, client, employee..."
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Search projects..."
               aria-label="Search projects"
             />
           </div>
@@ -1235,22 +1072,16 @@ export default function Projects() {
 
             <select
               value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(
-                  event.target.value
-                )
-              }
-              aria-label="Filter by project status"
+              onChange={(event) => {
+                setStatusFilter(event.target.value);
+                setPage(1);
+              }}
+              aria-label="Filter by status"
             >
-              <option value="All">
-                All Statuses
-              </option>
+              <option value="All">All Statuses</option>
 
               {STATUSES.map((status) => (
-                <option
-                  key={status}
-                  value={status}
-                >
+                <option key={status} value={status}>
                   {status}
                 </option>
               ))}
@@ -1258,22 +1089,16 @@ export default function Projects() {
 
             <select
               value={priorityFilter}
-              onChange={(event) =>
-                setPriorityFilter(
-                  event.target.value
-                )
-              }
+              onChange={(event) => {
+                setPriorityFilter(event.target.value);
+                setPage(1);
+              }}
               aria-label="Filter by priority"
             >
-              <option value="All">
-                All Priorities
-              </option>
+              <option value="All">All Priorities</option>
 
               {PRIORITIES.map((priority) => (
-                <option
-                  key={priority}
-                  value={priority}
-                >
+                <option key={priority} value={priority}>
                   {priority}
                 </option>
               ))}
@@ -1298,39 +1123,44 @@ export default function Projects() {
             </thead>
 
             <tbody>
-              {filteredProjects.map(
-                (project) => {
-                  const overdue = isOverdue(
-                    project,
-                    today
-                  );
+              {!loading &&
+                projects.map((project) => {
+                  const projectId = getId(project);
+                  const overdue = isOverdue(project);
 
-                  const progress = Math.min(
-                    100,
-                    Math.max(
-                      0,
+                  const progress = Math.max(
+                    0,
+                    Math.min(
+                      100,
                       Number(project.progress) || 0
                     )
                   );
 
+                  const assignedNames = Array.isArray(
+                    project.assignedTo
+                  )
+                    ? project.assignedTo
+                        .map((employee) =>
+                          typeof employee === "object"
+                            ? employee.name ||
+                              employee.email ||
+                              "Employee"
+                            : "Employee"
+                        )
+                        .join(", ")
+                    : "";
+
                   return (
-                    <tr key={project.id}>
+                    <tr key={projectId}>
                       <td>
                         <div className="projects__identity">
                           <span className="projects__avatar">
-                            <FolderKanban
-                              size={18}
-                            />
+                            <FolderKanban size={18} />
                           </span>
 
                           <div>
-                            <strong>
-                              {project.name}
-                            </strong>
-
-                            <small>
-                              {project.service}
-                            </small>
+                            <strong>{project.name}</strong>
+                            <small>{project.type}</small>
                           </div>
                         </div>
                       </td>
@@ -1338,17 +1168,14 @@ export default function Projects() {
                       <td>
                         <div className="projects__client">
                           <strong>
-                            {project.clientName}
+                            {project.client?.name ||
+                              "Unknown client"}
                           </strong>
 
-                          {project.business && (
+                          {project.client?.company && (
                             <small>
-                              <Building2
-                                size={12}
-                              />
-                              {
-                                project.business
-                              }
+                              <Building2 size={12} />
+                              {project.client.company}
                             </small>
                           )}
                         </div>
@@ -1356,30 +1183,52 @@ export default function Projects() {
 
                       <td>
                         <span className="projects__employee">
-                          <UserRound
-                            size={14}
-                          />
-
-                          {project.assignedTo ||
-                            "Unassigned"}
+                          <UserRound size={14} />
+                          {assignedNames || "Unassigned"}
                         </span>
                       </td>
 
                       <td>
-                        <span
-                          className={`projects__badge projects__badge--${statusClass(
-                            project.status
-                          )}`}
-                        >
-                          {project.status}
-                        </span>
+                        {canManage ? (
+                          <select
+                            className={`projects__badge projects__badge--${classSuffix(
+                              project.status
+                            )}`}
+                            value={project.status}
+                            disabled={Boolean(busyId)}
+                            onChange={(event) =>
+                              void changeStatus(
+                                project,
+                                event.target.value
+                              )
+                            }
+                            aria-label={`Status of ${project.name}`}
+                          >
+                            {STATUSES.map((status) => (
+                              <option
+                                key={status}
+                                value={status}
+                              >
+                                {status}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span
+                            className={`projects__badge projects__badge--${classSuffix(
+                              project.status
+                            )}`}
+                          >
+                            {project.status}
+                          </span>
+                        )}
                       </td>
 
                       <td>
                         <span
-                          className={`projects__priority projects__priority--${String(
+                          className={`projects__priority projects__priority--${classSuffix(
                             project.priority
-                          ).toLowerCase()}`}
+                          )}`}
                         >
                           {project.priority}
                         </span>
@@ -1388,9 +1237,7 @@ export default function Projects() {
                       <td>
                         <div className="projects__progress">
                           <div className="projects__progress-heading">
-                            <span>
-                              {progress}%
-                            </span>
+                            <span>{progress}%</span>
                           </div>
 
                           <div
@@ -1421,14 +1268,10 @@ export default function Projects() {
                           {overdue ? (
                             <Clock3 size={14} />
                           ) : (
-                            <CalendarDays
-                              size={14}
-                            />
+                            <CalendarDays size={14} />
                           )}
 
-                          {formatDate(
-                            project.deadline
-                          )}
+                          {formatDate(project.deadline)}
                         </span>
 
                         {overdue && (
@@ -1439,90 +1282,76 @@ export default function Projects() {
                       </td>
 
                       <td className="projects__amount">
-                        {currency(
-                          project.budget
-                        )}
+                        {formatMoney(project.budget)}
                       </td>
 
                       <td>
-                        <div className="projects__actions">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void openEdit(
-                                project
-                              );
-                            }}
-                            title="Edit project"
-                            aria-label={`Edit ${project.name}`}
-                            disabled={busy}
-                          >
-                            <Pencil
-                              size={16}
-                            />
-                          </button>
+                        {canManage && (
+                          <div className="projects__actions">
+                            <button
+                              type="button"
+                              onClick={() => openEdit(project)}
+                              disabled={Boolean(busyId)}
+                              title="Edit project"
+                              aria-label={`Edit ${project.name}`}
+                            >
+                              <Pencil size={16} />
+                            </button>
 
-                          <button
-                            type="button"
-                            className="projects__delete"
-                            onClick={() => {
-                              void deleteProject(
-                                project
-                              );
-                            }}
-                            title="Delete project"
-                            aria-label={`Delete ${project.name}`}
-                            disabled={busy}
-                          >
-                            <Trash2
-                              size={16}
-                            />
-                          </button>
-                        </div>
+                            {canDelete && (
+                              <button
+                                type="button"
+                                className="projects__delete"
+                                onClick={() =>
+                                  void deleteProject(project)
+                                }
+                                disabled={Boolean(busyId)}
+                                title="Delete project"
+                                aria-label={`Delete ${project.name}`}
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
-                }
-              )}
+                })}
 
-              {filteredProjects.length === 0 && (
+              {loading && (
                 <tr>
                   <td colSpan={9}>
                     <div className="projects__empty">
-                      <FolderKanban
-                        size={36}
-                      />
+                      Loading projects...
+                    </div>
+                  </td>
+                </tr>
+              )}
 
-                      <h3>
-                        {loading
-                          ? "Loading projects..."
-                          : "No projects found"}
-                      </h3>
+              {!loading && projects.length === 0 && (
+                <tr>
+                  <td colSpan={9}>
+                    <div className="projects__empty">
+                      <FolderKanban size={36} />
+
+                      <h3>No projects found</h3>
 
                       <p>
-                        {loading
-                          ? "Fetching projects from the backend."
-                          : projects.length === 0
-                            ? "Create your first project to get started."
-                            : "Try adjusting your search or filters."}
+                        Try changing filters or create
+                        your first project.
                       </p>
 
-                      {!loading &&
-                        projects.length === 0 && (
-                          <button
-                            type="button"
-                            className="projects__button projects__button--primary"
-                            onClick={() => {
-                              void openAdd();
-                            }}
-                            disabled={busy}
-                          >
-                            <Plus
-                              size={16}
-                            />
-                            Create Project
-                          </button>
-                        )}
+                      {canManage && (
+                        <button
+                          type="button"
+                          className="projects__button projects__button--primary"
+                          onClick={openCreate}
+                        >
+                          <Plus size={16} />
+                          Create Project
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1532,17 +1361,55 @@ export default function Projects() {
         </div>
 
         <div className="projects__table-footer">
-          Showing{" "}
-          {filteredProjects.length} of{" "}
-          {projects.length} projects
+          <span>
+            Showing {projects.length} of{" "}
+            {pagination.total || 0} projects
+          </span>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <button
+              type="button"
+              disabled={page <= 1 || loading}
+              onClick={() =>
+                setPage((previous) => previous - 1)
+              }
+            >
+              Previous
+            </button>
+
+            <span>
+              Page {page} of{" "}
+              {Math.max(
+                1,
+                pagination.totalPages || 0
+              )}
+            </span>
+
+            <button
+              type="button"
+              disabled={
+                loading ||
+                page >= pagination.totalPages
+              }
+              onClick={() =>
+                setPage((previous) => previous + 1)
+              }
+            >
+              Next
+            </button>
+          </div>
         </div>
       </section>
 
-      {modalOpen && (
+      {canManage && modalOpen && (
         <ProjectModal
           project={editingProject}
-          clients={clients}
-          users={users}
           onClose={closeModal}
           onSave={saveProject}
         />

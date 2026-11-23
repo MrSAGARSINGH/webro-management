@@ -1,6 +1,7 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NavLink } from "react-router-dom";
+
 import {
   LayoutDashboard,
   UsersRound,
@@ -24,25 +25,35 @@ import {
 
 import "./Sidebar.scss";
 
+// ======================================
+// ROLE PERMISSIONS
+// Must match App.jsx route permissions
+// ======================================
+
+const ALL_ROLES = ["admin", "manager", "employee"];
+const MANAGEMENT_ROLES = ["admin", "manager"];
+
 const navigation = [
   {
     title: "OVERVIEW",
     items: [
       {
         name: "Dashboard",
-        path: "/",
+        path: "/dashboard",
         icon: LayoutDashboard,
-        end: true,
+        roles: MANAGEMENT_ROLES,
       },
       {
         name: "Leads",
         path: "/leads",
         icon: UsersRound,
+        roles: ALL_ROLES,
       },
       {
         name: "Clients",
         path: "/clients",
         icon: UserRound,
+        roles: MANAGEMENT_ROLES,
       },
     ],
   },
@@ -53,21 +64,25 @@ const navigation = [
         name: "Calling",
         path: "/calling",
         icon: PhoneCall,
+        roles: ALL_ROLES,
       },
       {
         name: "Follow-ups",
         path: "/follow-ups",
         icon: CalendarClock,
+        roles: ALL_ROLES,
       },
       {
         name: "Payments",
         path: "/payments",
         icon: Wallet,
+        roles: MANAGEMENT_ROLES,
       },
       {
         name: "Invoices",
         path: "/invoices",
         icon: ReceiptText,
+        roles: MANAGEMENT_ROLES,
       },
     ],
   },
@@ -78,21 +93,25 @@ const navigation = [
         name: "Projects",
         path: "/projects",
         icon: FolderKanban,
+        roles: ALL_ROLES,
       },
       {
         name: "Employees",
         path: "/employees",
         icon: UserCog,
+        roles: MANAGEMENT_ROLES,
       },
       {
         name: "Tasks",
         path: "/tasks",
         icon: ListTodo,
+        roles: MANAGEMENT_ROLES,
       },
       {
         name: "Calendar",
         path: "/calendar",
         icon: CalendarDays,
+        roles: MANAGEMENT_ROLES,
       },
     ],
   },
@@ -103,17 +122,61 @@ const navigation = [
         name: "Reports",
         path: "/reports",
         icon: ChartNoAxesCombined,
+        roles: MANAGEMENT_ROLES,
       },
       {
         name: "Settings",
         path: "/settings",
         icon: Settings,
+        roles: MANAGEMENT_ROLES,
       },
     ],
   },
 ];
 
+// ======================================
+// HELPERS
+// ======================================
+
+const getInitials = (name) => {
+  if (!name || typeof name !== "string") {
+    return "U";
+  }
+
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (parts.length === 0) {
+    return "U";
+  }
+
+  return parts
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("");
+};
+
+const getRoleLabel = (role) => {
+  const labels = {
+    admin: "Administrator",
+    manager: "Manager",
+    employee: "Employee",
+  };
+
+  return labels[role] || "User";
+};
+
+const getDefaultRoute = (role) =>
+  role === "employee" ? "/leads" : "/dashboard";
+
+// ======================================
+// SIDEBAR COMPONENT
+// ======================================
+
 export default function Sidebar({
+  user,
   isOpen = false,
   onClose = () => {},
   collapsed = false,
@@ -122,30 +185,73 @@ export default function Sidebar({
   const [internalCollapsed, setInternalCollapsed] =
     useState(false);
 
+  const [openGroups, setOpenGroups] = useState(
+    navigation.map((group) => group.title)
+  );
+
   const isCollapsed =
     typeof onToggleCollapse === "function"
       ? collapsed
       : internalCollapsed;
 
-  const [openGroups, setOpenGroups] = useState(
-    navigation.map((group) => group.title)
-  );
+  const role = user?.role || "";
+
+  const userName =
+    typeof user?.name === "string" &&
+    user.name.trim()
+      ? user.name.trim()
+      : "User";
+
+  const userInitials = getInitials(userName);
+  const roleLabel = getRoleLabel(role);
+  const homeRoute = getDefaultRoute(role);
+
+  // ======================================
+  // FILTER NAVIGATION BY ROLE
+  // ======================================
+
+  const visibleNavigation = useMemo(() => {
+    if (!ALL_ROLES.includes(role)) {
+      return [];
+    }
+
+    return navigation
+      .map((group) => ({
+        ...group,
+        items: group.items.filter((item) =>
+          item.roles.includes(role)
+        ),
+      }))
+      .filter((group) => group.items.length > 0);
+  }, [role]);
+
+  // ======================================
+  // COLLAPSE SIDEBAR
+  // ======================================
 
   const toggleCollapse = () => {
     if (typeof onToggleCollapse === "function") {
       onToggleCollapse();
     } else {
-      setInternalCollapsed((prev) => !prev);
+      setInternalCollapsed((previous) => !previous);
     }
   };
 
+  // ======================================
+  // TOGGLE NAVIGATION GROUP
+  // ======================================
+
   const toggleGroup = (title) => {
-    setOpenGroups((prev) =>
-      prev.includes(title)
-        ? prev.filter((item) => item !== title)
-        : [...prev, title]
+    setOpenGroups((previous) =>
+      previous.includes(title)
+        ? previous.filter((item) => item !== title)
+        : [...previous, title]
     );
   };
+
+  // ======================================
+  // CLOSE MOBILE SIDEBAR ON ESCAPE
+  // ======================================
 
   useEffect(() => {
     if (!isOpen) return;
@@ -156,15 +262,27 @@ export default function Sidebar({
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener(
+      "keydown",
+      handleKeyDown
+    );
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener(
+        "keydown",
+        handleKeyDown
+      );
     };
   }, [isOpen, onClose]);
 
+  // ======================================
+  // RENDER
+  // ======================================
+
   return (
     <>
+      {/* MOBILE OVERLAY */}
+
       {isOpen && (
         <button
           type="button"
@@ -180,20 +298,21 @@ export default function Sidebar({
         className={[
           "webro-sidebar",
           isOpen && "webro-sidebar--open",
-          isCollapsed && "webro-sidebar--collapsed",
+          isCollapsed &&
+            "webro-sidebar--collapsed",
         ]
           .filter(Boolean)
           .join(" ")}
         aria-label="Workspace navigation"
       >
-        {/* Brand */}
+        {/* ================= BRAND ================= */}
 
         <div className="webro-sidebar__brand">
           <NavLink
-            to="/"
+            to={homeRoute}
             className="webro-sidebar__brand-link"
             onClick={onClose}
-            aria-label="WEBRO Dashboard"
+            aria-label="WEBRO Workspace Home"
           >
             <div className="webro-sidebar__logo">
               <span>W</span>
@@ -215,10 +334,10 @@ export default function Sidebar({
           </button>
         </div>
 
-        {/* Navigation */}
+        {/* ================= NAVIGATION ================= */}
 
         <nav className="webro-sidebar__navigation">
-          {navigation.map((group) => {
+          {visibleNavigation.map((group) => {
             const groupOpen =
               isCollapsed ||
               openGroups.includes(group.title);
@@ -231,7 +350,9 @@ export default function Sidebar({
                 <button
                   type="button"
                   className="webro-sidebar__group-title"
-                  onClick={() => toggleGroup(group.title)}
+                  onClick={() =>
+                    toggleGroup(group.title)
+                  }
                   aria-expanded={groupOpen}
                   disabled={isCollapsed}
                 >
@@ -259,8 +380,14 @@ export default function Sidebar({
                           to={path}
                           end={end}
                           onClick={onClose}
-                          title={isCollapsed ? name : undefined}
-                          className={({ isActive }) =>
+                          title={
+                            isCollapsed
+                              ? name
+                              : undefined
+                          }
+                          className={({
+                            isActive,
+                          }) =>
                             [
                               "webro-sidebar__link",
                               isActive &&
@@ -291,7 +418,7 @@ export default function Sidebar({
           })}
         </nav>
 
-        {/* Footer */}
+        {/* ================= FOOTER ================= */}
 
         <div className="webro-sidebar__footer">
           <div className="webro-sidebar__workspace">
@@ -305,16 +432,23 @@ export default function Sidebar({
             </div>
           </div>
 
+          {/* LOGGED-IN USER PROFILE */}
+
           <div className="webro-sidebar__profile">
             <div className="webro-sidebar__avatar">
-              AD
+              {userInitials}
             </div>
 
             <div className="webro-sidebar__profile-info">
-              <strong>Admin</strong>
-              <span>Administrator</span>
+              <strong title={userName}>
+                {userName}
+              </strong>
+
+              <span>{roleLabel}</span>
             </div>
           </div>
+
+          {/* COLLAPSE / EXPAND */}
 
           <button
             type="button"

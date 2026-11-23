@@ -22,6 +22,10 @@ import taskRoutes from "./routes/taskRoutes.js";
 import employeeRoutes from "./routes/employeeRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 
+// New MongoDB-backed modules
+import calendarRoutes from "./routes/calendarRoutes.js";
+import settingsRoutes from "./routes/settingsRoutes.js";
+
 // ======================================
 // Security Middleware
 // ======================================
@@ -306,6 +310,43 @@ businessRouter.use(
 businessRouter.use(
   "/employees",
   employeeRoutes
+);
+
+// ======================================
+// Calendar Management Routes
+// ======================================
+
+// MongoDB-backed calendar events.
+//
+// GET requests require authentication.
+//
+// POST, PATCH and DELETE additionally
+// require CSRF protection.
+//
+// Event ownership and visibility
+// are enforced by calendarController.
+
+businessRouter.use(
+  "/calendar",
+  calendarRoutes
+);
+
+// ======================================
+// Settings Management Routes
+// ======================================
+
+// Workspace company settings:
+// Admin-only modifications.
+//
+// Personal preferences and notifications:
+// Authenticated users can modify
+// their own settings.
+//
+// All mutations require CSRF protection.
+
+businessRouter.use(
+  "/settings",
+  settingsRoutes
 );
 
 // ======================================

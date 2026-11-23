@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Settings as SettingsIcon,
   Building2,
@@ -22,9 +22,17 @@ import {
   Info,
 } from "lucide-react";
 
+import { settingsApi } from "../../services/settingsApi.js";
 import "./Settings.scss";
 
-const SETTINGS_KEY = "webro-management-settings-v1";
+// ======================================
+// Configuration
+// ======================================
+
+const API_URL = (
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api"
+).replace(/\/+$/, "");
 
 const MODULE_KEYS = {
   leads: "webro-management-leads-v1",
@@ -64,47 +72,41 @@ const DEFAULT_SETTINGS = {
   },
 };
 
+const TABS = [
+  { id: "company", label: "Company Profile", icon: Building2 },
+  { id: "preferences", label: "Preferences", icon: Palette },
+  { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "data", label: "Data Management", icon: Database },
+];
+
 const cloneDefaults = () =>
-  JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+  structuredClone(DEFAULT_SETTINGS);
 
-function readSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+const normalizeSettings = (value) => {
+  const defaults = cloneDefaults();
 
-    if (!raw) return cloneDefaults();
+  return {
+    company: {
+      ...defaults.company,
+      ...(value?.company || {}),
+    },
+    preferences: {
+      ...defaults.preferences,
+      ...(value?.preferences || {}),
+    },
+    notifications: {
+      ...defaults.notifications,
+      ...(value?.notifications || {}),
+    },
+  };
+};
 
-    const parsed = JSON.parse(raw);
+const getErrorMessage = (error) =>
+  error instanceof Error
+    ? error.message
+    : "An unexpected error occurred.";
 
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      Array.isArray(parsed)
-    ) {
-      return cloneDefaults();
-    }
-
-    const defaults = cloneDefaults();
-
-    return {
-      company: {
-        ...defaults.company,
-        ...parsed.company,
-      },
-      preferences: {
-        ...defaults.preferences,
-        ...parsed.preferences,
-      },
-      notifications: {
-        ...defaults.notifications,
-        ...parsed.notifications,
-      },
-    };
-  } catch {
-    return cloneDefaults();
-  }
-}
-
-function readRecords(key) {
+const readRecords = (key) => {
   try {
     const raw = localStorage.getItem(key);
     const parsed = raw ? JSON.parse(raw) : [];
@@ -113,7 +115,7 @@ function readRecords(key) {
   } catch {
     return [];
   }
-}
+};
 
 function downloadJson(data, filename) {
   const blob = new Blob(
@@ -166,83 +168,156 @@ function SettingToggle({
   );
 }
 
+// ======================================
+// Settings Page
+// ======================================
+
 export default function Settings() {
-  const [settings, setSettings] =
-    useState(readSettings);
+  const [settings, setSettings] = useState(cloneDefaults);
+  const [savedSettings, setSavedSettings] = useState(cloneDefaults);
 
-  const [activeTab, setActiveTab] =
-    useState("company");
-
+  const [activeTab, setActiveTab] = useState("company");
+  const [role, setRole] = useState(null);
   const [message, setMessage] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [recordCounts, setRecordCounts] =
-    useState({});
 
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const [recordCounts, setRecordCounts] = useState({});
   const fileInputRef = useRef(null);
+
+  const isAdmin = role === "admin";
 
   const showMessage = (type, text) => {
     setMessage({ type, text });
   };
 
-  const refreshCounts = () => {
+  // ====================================
+  // Browser-Local Record Counts
+  // ====================================
+
+  const refreshCounts = useCallback(() => {
     const counts = Object.fromEntries(
-      Object.entries(MODULE_KEYS).map(
-        ([name, key]) => [
-          name,
-          readRecords(key).length,
-        ]
-      )
+      Object.entries(MODULE_KEYS).map(([name, key]) => [
+        name,
+        readRecords(key).length,
+      ])
     );
 
     setRecordCounts(counts);
-  };
-
-  useEffect(() => {
-    refreshCounts();
   }, []);
 
-  const updateCompany = (field, value) => {
+  // ====================================
+  // Load Authenticated User + Settings
+  // ====================================
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadSettings() {
+      setLoading(true);
+
+      try {
+        const [settingsResponse, authResponse] =
+          await Promise.all([
+            settingsApi.getAll({
+              signal: controller.signal,
+            }),
+            fetch(`${API_URL}/auth/me`, {
+              method: "GET",
+              credentials: "include",
+              signal: controller.signal,
+              headers: {
+                Accept: "application/json",
+              },
+            }),
+          ]);
+
+        const authResult = await authResponse
+          .json()
+          .catch(() => null);
+
+        if (
+          !authResponse.ok ||
+          authResult?.success !== true ||
+          !authResult.user?.role
+        ) {
+          throw new Error(
+            "Unable to verify your account permissions."
+          );
+        }
+
+        if (controller.signal.aborted) return;
+
+        const normalized = normalizeSettings(
+          settingsResponse.settings
+        );
+
+        setSettings(normalized);
+        setSavedSettings(structuredClone(normalized));
+        setRole(authResult.user.role);
+        setMessage(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        setRole(null);
+        showMessage(
+          "error",
+          `Unable to load settings: ${getErrorMessage(error)}`
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadSettings();
+    refreshCounts();
+
+    return () => controller.abort();
+  }, [refreshCounts]);
+
+  // ====================================
+  // Form Updates
+  // ====================================
+
+  const updateSection = (section, field, value) => {
+    if (loading || saving) return;
+    if (section === "company" && !isAdmin) return;
+
     setSettings((previous) => ({
       ...previous,
-      company: {
-        ...previous.company,
+      [section]: {
+        ...previous[section],
         [field]: value,
       },
     }));
+
     setMessage(null);
   };
 
-  const updatePreference = (field, value) => {
-    setSettings((previous) => ({
-      ...previous,
-      preferences: {
-        ...previous.preferences,
-        [field]: value,
-      },
-    }));
-    setMessage(null);
-  };
+  const updateCompany = (field, value) =>
+    updateSection("company", field, value);
 
-  const updateNotification = (field, value) => {
-    setSettings((previous) => ({
-      ...previous,
-      notifications: {
-        ...previous.notifications,
-        [field]: value,
-      },
-    }));
-    setMessage(null);
-  };
+  const updatePreference = (field, value) =>
+    updateSection("preferences", field, value);
 
-  const saveSettings = () => {
-    const company = settings.company;
+  const updateNotification = (field, value) =>
+    updateSection("notifications", field, value);
 
-    if (!company.name.trim()) {
-      showMessage(
-        "error",
-        "Company name is required."
+  // ====================================
+  // Validate Company
+  // ====================================
+
+  const validateCompany = (company) => {
+    if (
+      company.name.trim().length < 2 ||
+      company.name.trim().length > 150
+    ) {
+      throw new Error(
+        "Company name must contain 2–150 characters."
       );
-      return;
     }
 
     if (
@@ -251,57 +326,140 @@ export default function Settings() {
         company.email
       )
     ) {
+      throw new Error(
+        "Enter a valid company email address."
+      );
+    }
+
+    if (company.website) {
+      try {
+        const url = new URL(company.website);
+
+        if (
+          !["http:", "https:"].includes(url.protocol) ||
+          !url.hostname
+        ) {
+          throw new Error("Invalid URL");
+        }
+      } catch {
+        throw new Error(
+          "Enter a valid HTTP or HTTPS website URL."
+        );
+      }
+    }
+
+    if (
+      company.gstin &&
+      !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(
+        company.gstin
+      )
+    ) {
+      throw new Error("Enter a valid GSTIN.");
+    }
+  };
+
+  // ====================================
+  // Save Active Settings Section
+  // ====================================
+
+  const saveSettings = async () => {
+    if (saving || loading || !role) return;
+
+    if (activeTab === "data") {
       showMessage(
         "error",
-        "Enter a valid company email address."
+        "Select Company, Preferences or Notifications to save."
       );
       return;
     }
 
-    if (
-      company.website &&
-      !/^https?:\/\/[^.\s]+\.[^\s]+$/i.test(
-        company.website
-      )
-    ) {
+    if (activeTab === "company" && !isAdmin) {
       showMessage(
         "error",
-        "Enter a valid website URL."
+        "Only Admin can update company information."
       );
       return;
     }
 
     setSaving(true);
+    setMessage(null);
 
     try {
-      localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify(settings)
+      const section = activeTab;
+      const current = settings[section];
+      const previous = savedSettings[section];
+
+      const changes = Object.fromEntries(
+        Object.entries(current).filter(
+          ([key, value]) => value !== previous[key]
+        )
       );
+
+      if (Object.keys(changes).length === 0) {
+        showMessage("success", "No changes to save.");
+        return;
+      }
+
+      if (section === "company") {
+        validateCompany(current);
+      }
+
+      let result;
+
+      if (section === "company") {
+        result = await settingsApi.updateCompany(changes);
+      } else if (section === "preferences") {
+        result = await settingsApi.updatePreferences(changes);
+      } else {
+        result = await settingsApi.updateNotifications(changes);
+      }
+
+      const updatedSection = {
+        ...current,
+        ...result[section],
+      };
+
+      setSettings((state) => ({
+        ...state,
+        [section]: updatedSection,
+      }));
+
+      setSavedSettings((state) => ({
+        ...state,
+        [section]: structuredClone(updatedSection),
+      }));
 
       showMessage(
         "success",
-        "Workspace settings saved successfully."
+        `${
+          section === "company"
+            ? "Company information"
+            : section === "preferences"
+              ? "Preferences"
+              : "Notification preferences"
+        } saved to MongoDB successfully.`
       );
-    } catch {
+    } catch (error) {
       showMessage(
         "error",
-        "Unable to save workspace settings."
+        `Unable to save settings: ${getErrorMessage(error)}`
       );
     } finally {
       setSaving(false);
     }
   };
 
+  // ====================================
+  // Browser-Only Backup
+  // ====================================
+
   const exportBackup = () => {
     try {
       const records = Object.fromEntries(
-        Object.entries(MODULE_KEYS).map(
-          ([name, key]) => [
-            name,
-            readRecords(key),
-          ]
-        )
+        Object.entries(MODULE_KEYS).map(([name, key]) => [
+          name,
+          readRecords(key),
+        ])
       );
 
       const backup = {
@@ -309,15 +467,12 @@ export default function Settings() {
         version: 1,
         backupScope: "browser-local-only",
         warning:
-          "Browser localStorage only; MongoDB records are not included.",
+          "This backup contains only legacy browser records. MongoDB data and settings are NOT included.",
         exportedAt: new Date().toISOString(),
-        settings,
         records,
       };
 
-      const date = new Date()
-        .toISOString()
-        .slice(0, 10);
+      const date = new Date().toISOString().slice(0, 10);
 
       downloadJson(
         backup,
@@ -326,13 +481,10 @@ export default function Settings() {
 
       showMessage(
         "success",
-        "Browser-only backup exported. MongoDB records are NOT included."
+        "Browser-only backup exported. MongoDB records and settings are not included."
       );
-    } catch {
-      showMessage(
-        "error",
-        "Unable to generate backup."
-      );
+    } catch (error) {
+      showMessage("error", getErrorMessage(error));
     }
   };
 
@@ -374,7 +526,7 @@ export default function Settings() {
         backup.records
       )) {
         if (
-          !(name in MODULE_KEYS) ||
+          !Object.hasOwn(MODULE_KEYS, name) ||
           !Array.isArray(records)
         ) {
           throw new Error(
@@ -385,7 +537,7 @@ export default function Settings() {
 
       if (
         !window.confirm(
-          "Restore browser-local data only? This will NOT restore MongoDB records. Existing local records in the included modules will be replaced."
+          "Restore legacy browser-local records? MongoDB records and settings will NOT be changed. Existing local records for included modules will be replaced."
         )
       ) {
         return;
@@ -400,26 +552,16 @@ export default function Settings() {
         JSON.stringify(records),
       ]);
 
-      if (backup.settings) {
-        updates.push([
-          SETTINGS_KEY,
-          JSON.stringify(backup.settings),
-        ]);
+      for (const [key] of updates) {
+        previousValues.set(key, localStorage.getItem(key));
       }
 
-      updates.forEach(([key]) => {
-        previousValues.set(
-          key,
-          localStorage.getItem(key)
-        );
-      });
-
       try {
-        updates.forEach(([key, value]) => {
+        for (const [key, value] of updates) {
           localStorage.setItem(key, value);
-        });
+        }
       } catch (error) {
-        previousValues.forEach((value, key) => {
+        for (const [key, value] of previousValues) {
           try {
             if (value === null) {
               localStorage.removeItem(key);
@@ -427,60 +569,87 @@ export default function Settings() {
               localStorage.setItem(key, value);
             }
           } catch {
-            // Browser storage may be unavailable.
+            // Storage may be unavailable.
           }
-        });
+        }
 
         throw error;
       }
 
-      setSettings(readSettings());
       refreshCounts();
 
       showMessage(
         "success",
-        "Backup restored. Reload the dashboard to refresh all modules."
+        "Legacy browser data restored. MongoDB data remains unchanged."
       );
     } catch (error) {
-      showMessage(
-        "error",
-        error.message || "Backup restore failed."
-      );
+      showMessage("error", getErrorMessage(error));
     } finally {
       event.target.value = "";
     }
   };
 
-  const resetSettings = () => {
+  // ====================================
+  // Reset Current Settings Section
+  // ====================================
+
+  const resetSettings = async () => {
+    if (saving || loading || !role) return;
+
     if (
       !window.confirm(
-        "Reset workspace settings to defaults?"
+        "Reset your personal preferences and notifications to defaults? Company information will remain unchanged."
       )
     ) {
       return;
     }
 
-    const defaults = cloneDefaults();
+    setSaving(true);
+    setMessage(null);
 
     try {
-      localStorage.setItem(
-        SETTINGS_KEY,
-        JSON.stringify(defaults)
-      );
+      const defaults = cloneDefaults();
 
-      setSettings(defaults);
+      const [preferencesResult, notificationsResult] =
+        await Promise.allSettled([
+          settingsApi.updatePreferences(defaults.preferences),
+          settingsApi.updateNotifications(defaults.notifications),
+        ]);
 
-      showMessage(
-        "success",
-        "Workspace settings reset to defaults."
-      );
-    } catch {
+      // Reload server state even if one request failed.
+      const latest = await settingsApi.getAll();
+      const normalized = normalizeSettings(latest.settings);
+
+      setSettings(normalized);
+      setSavedSettings(structuredClone(normalized));
+
+      if (
+        preferencesResult.status === "fulfilled" &&
+        notificationsResult.status === "fulfilled"
+      ) {
+        showMessage(
+          "success",
+          "Personal settings reset to defaults in MongoDB."
+        );
+      } else {
+        showMessage(
+          "error",
+          "Some settings could not be reset. Current MongoDB values have been reloaded."
+        );
+      }
+    } catch (error) {
       showMessage(
         "error",
-        "Unable to reset settings."
+        `Unable to reset settings: ${getErrorMessage(error)}`
       );
+    } finally {
+      setSaving(false);
     }
   };
+
+  // ====================================
+  // Clear Legacy Browser Module
+  // ====================================
 
   const clearModule = (name) => {
     const key = MODULE_KEYS[name];
@@ -489,7 +658,7 @@ export default function Settings() {
 
     if (
       !window.confirm(
-        `Delete all ${name} records from this browser? This action cannot be undone.`
+        `Delete all legacy ${name} records from this browser? MongoDB records will not be deleted.`
       )
     ) {
       return;
@@ -501,38 +670,19 @@ export default function Settings() {
 
       showMessage(
         "success",
-        `${name} records deleted successfully. Reload other open views to refresh them.`
+        `Legacy ${name} browser records deleted. MongoDB records were not changed.`
       );
     } catch {
       showMessage(
         "error",
-        `Unable to delete ${name} records.`
+        `Unable to clear ${name} browser records.`
       );
     }
   };
 
-  const tabs = [
-    {
-      id: "company",
-      label: "Company Profile",
-      icon: Building2,
-    },
-    {
-      id: "preferences",
-      label: "Preferences",
-      icon: Palette,
-    },
-    {
-      id: "notifications",
-      label: "Notifications",
-      icon: Bell,
-    },
-    {
-      id: "data",
-      label: "Data Management",
-      icon: Database,
-    },
-  ];
+  // ====================================
+  // Render
+  // ====================================
 
   return (
     <div className="settings-page">
@@ -554,10 +704,20 @@ export default function Settings() {
           type="button"
           className="settings-page__button settings-page__button--primary"
           onClick={saveSettings}
-          disabled={saving}
+          disabled={
+            loading ||
+            saving ||
+            !role ||
+            activeTab === "data" ||
+            (activeTab === "company" && !isAdmin)
+          }
         >
           <Save size={17} />
-          Save Settings
+          {saving
+            ? "Saving..."
+            : loading
+              ? "Loading..."
+              : "Save Settings"}
         </button>
       </div>
 
@@ -583,7 +743,7 @@ export default function Settings() {
             <span>Workspace Settings</span>
           </div>
 
-          {tabs.map(({ id, label, icon: Icon }) => (
+          {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
@@ -593,9 +753,11 @@ export default function Settings() {
                   : ""
               }`}
               onClick={() => {
+                if (saving) return;
                 setActiveTab(id);
                 setMessage(null);
               }}
+              disabled={saving}
             >
               <Icon size={17} />
               {label}
@@ -605,9 +767,9 @@ export default function Settings() {
           <div className="settings-page__nav-footer">
             <ShieldCheck size={17} />
             <p>
-              Browser-local workspace
+              MongoDB-backed settings
               <small>
-                Data is stored on this device.
+                Legacy browser data is managed separately.
               </small>
             </p>
           </div>
@@ -639,13 +801,11 @@ export default function Settings() {
                       <input
                         value={settings.company.name}
                         onChange={(e) =>
-                          updateCompany(
-                            "name",
-                            e.target.value
-                          )
+                          updateCompany("name", e.target.value)
                         }
-                        maxLength={120}
+                        maxLength={150}
                         placeholder="Company name"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -658,12 +818,11 @@ export default function Settings() {
                         type="email"
                         value={settings.company.email}
                         onChange={(e) =>
-                          updateCompany(
-                            "email",
-                            e.target.value
-                          )
+                          updateCompany("email", e.target.value)
                         }
+                        maxLength={254}
                         placeholder="company@example.com"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -676,12 +835,11 @@ export default function Settings() {
                         type="tel"
                         value={settings.company.phone}
                         onChange={(e) =>
-                          updateCompany(
-                            "phone",
-                            e.target.value
-                          )
+                          updateCompany("phone", e.target.value)
                         }
+                        maxLength={25}
                         placeholder="Business phone"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -694,12 +852,11 @@ export default function Settings() {
                         type="url"
                         value={settings.company.website}
                         onChange={(e) =>
-                          updateCompany(
-                            "website",
-                            e.target.value
-                          )
+                          updateCompany("website", e.target.value)
                         }
+                        maxLength={500}
                         placeholder="https://example.com"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -718,6 +875,7 @@ export default function Settings() {
                         }
                         maxLength={15}
                         placeholder="GST registration number"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -729,14 +887,12 @@ export default function Settings() {
                       <textarea
                         value={settings.company.address}
                         onChange={(e) =>
-                          updateCompany(
-                            "address",
-                            e.target.value
-                          )
+                          updateCompany("address", e.target.value)
                         }
                         rows={3}
-                        maxLength={500}
+                        maxLength={1000}
                         placeholder="Company office address"
+                        disabled={loading || saving || !isAdmin}
                       />
                     </div>
                   </label>
@@ -744,10 +900,9 @@ export default function Settings() {
 
                 <div className="settings-page__notice">
                   <Info size={17} />
-                  Company details are saved locally.
-                  Existing invoices and other modules
-                  will not automatically use these
-                  values until integrated.
+                  {isAdmin
+                    ? "Company information is stored in MongoDB. Other modules must explicitly integrate these values before using them."
+                    : "Company information is read-only. Only an Admin can modify workspace details."}
                 </div>
               </div>
             </section>
@@ -774,88 +929,62 @@ export default function Settings() {
                   <label>
                     Dashboard Theme
                     <select
-                      value={
-                        settings.preferences.theme
-                      }
+                      value={settings.preferences.theme}
                       onChange={(e) =>
-                        updatePreference(
-                          "theme",
-                          e.target.value
-                        )
+                        updatePreference("theme", e.target.value)
                       }
+                      disabled={loading || saving || !role}
                     >
-                      <option value="dark">
-                        Dark
-                      </option>
-                      <option value="light">
-                        Light
-                      </option>
+                      <option value="dark">Dark</option>
+                      <option value="light">Light</option>
+                      <option value="system">System</option>
                     </select>
                   </label>
 
                   <label>
                     Accent Color
                     <select
-                      value={
-                        settings.preferences.accent
-                      }
+                      value={settings.preferences.accent}
                       onChange={(e) =>
-                        updatePreference(
-                          "accent",
-                          e.target.value
-                        )
+                        updatePreference("accent", e.target.value)
                       }
+                      disabled={loading || saving || !role}
                     >
-                      <option value="lime">
-                        Lime Green
-                      </option>
-                      <option value="blue">
-                        Blue
-                      </option>
-                      <option value="purple">
-                        Purple
-                      </option>
+                      <option value="lime">Lime Green</option>
+                      <option value="blue">Blue</option>
+                      <option value="purple">Purple</option>
+                      <option value="orange">Orange</option>
+                      <option value="cyan">Cyan</option>
                     </select>
                   </label>
 
                   <label>
                     Currency
                     <select
-                      value={
-                        settings.preferences.currency
-                      }
+                      value={settings.preferences.currency}
                       onChange={(e) =>
-                        updatePreference(
-                          "currency",
-                          e.target.value
-                        )
+                        updatePreference("currency", e.target.value)
                       }
+                      disabled={loading || saving || !role}
                     >
-                      <option value="INR">
-                        INR — Indian Rupee
-                      </option>
+                      <option value="INR">INR — Indian Rupee</option>
+                      <option value="USD">USD — US Dollar</option>
+                      <option value="EUR">EUR — Euro</option>
                     </select>
                   </label>
 
                   <label>
                     Date Format
                     <select
-                      value={
-                        settings.preferences.dateFormat
-                      }
+                      value={settings.preferences.dateFormat}
                       onChange={(e) =>
-                        updatePreference(
-                          "dateFormat",
-                          e.target.value
-                        )
+                        updatePreference("dateFormat", e.target.value)
                       }
+                      disabled={loading || saving || !role}
                     >
-                      <option value="DD/MM/YYYY">
-                        DD/MM/YYYY
-                      </option>
-                      <option value="YYYY-MM-DD">
-                        YYYY-MM-DD
-                      </option>
+                      <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                      <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                      <option value="YYYY-MM-DD">YYYY-MM-DD</option>
                     </select>
                   </label>
                 </div>
@@ -863,24 +992,18 @@ export default function Settings() {
                 <SettingToggle
                   title="Compact Dashboard"
                   description="Preference for reduced spacing and denser layouts."
-                  checked={
-                    settings.preferences.compactMode
-                  }
+                  checked={settings.preferences.compactMode}
                   onChange={(value) =>
-                    updatePreference(
-                      "compactMode",
-                      value
-                    )
+                    updatePreference("compactMode", value)
                   }
+                  disabled={loading || saving || !role}
                 />
 
                 <div className="settings-page__notice">
                   <Info size={17} />
-                  These are stored preferences.
-                  Applying theme, accent, date format
-                  and compact mode across the dashboard
-                  requires connecting them to the global
-                  layout and styles.
+                  Preferences are saved per user in MongoDB.
+                  Applying them globally requires connecting
+                  these values to the dashboard layout and styles.
                 </div>
               </div>
             </section>
@@ -907,71 +1030,51 @@ export default function Settings() {
                 <SettingToggle
                   title="Task Reminders"
                   description="Reminders for upcoming task deadlines."
-                  checked={
-                    settings.notifications.taskReminders
-                  }
+                  checked={settings.notifications.taskReminders}
                   onChange={(value) =>
-                    updateNotification(
-                      "taskReminders",
-                      value
-                    )
+                    updateNotification("taskReminders", value)
                   }
+                  disabled={loading || saving || !role}
                 />
 
                 <SettingToggle
                   title="Follow-up Reminders"
                   description="Reminders for scheduled client callbacks."
-                  checked={
-                    settings.notifications.followUpReminders
-                  }
+                  checked={settings.notifications.followUpReminders}
                   onChange={(value) =>
-                    updateNotification(
-                      "followUpReminders",
-                      value
-                    )
+                    updateNotification("followUpReminders", value)
                   }
+                  disabled={loading || saving || !role}
                 />
 
                 <SettingToggle
                   title="Payment Reminders"
                   description="Reminders for upcoming and overdue payments."
-                  checked={
-                    settings.notifications.paymentReminders
-                  }
+                  checked={settings.notifications.paymentReminders}
                   onChange={(value) =>
-                    updateNotification(
-                      "paymentReminders",
-                      value
-                    )
+                    updateNotification("paymentReminders", value)
                   }
+                  disabled={loading || saving || !role}
                 />
 
                 <SettingToggle
                   title="Project Deadlines"
                   description="Reminders for project delivery dates."
-                  checked={
-                    settings.notifications.projectDeadlines
-                  }
+                  checked={settings.notifications.projectDeadlines}
                   onChange={(value) =>
-                    updateNotification(
-                      "projectDeadlines",
-                      value
-                    )
+                    updateNotification("projectDeadlines", value)
                   }
+                  disabled={loading || saving || !role}
                 />
 
                 <SettingToggle
                   title="Desktop Notifications"
-                  description="Preference for browser notifications. Permission and delivery are not implemented yet."
-                  checked={
-                    settings.notifications.desktopNotifications
-                  }
+                  description="Browser notification permission and delivery are not implemented yet."
+                  checked={settings.notifications.desktopNotifications}
                   onChange={(value) =>
-                    updateNotification(
-                      "desktopNotifications",
-                      value
-                    )
+                    updateNotification("desktopNotifications", value)
                   }
+                  disabled={loading || saving || !role}
                 />
               </div>
             </section>
@@ -986,9 +1089,10 @@ export default function Settings() {
                   </div>
 
                   <div>
-                    <h2>Data Backup & Restore</h2>
+                    <h2>Data Backup &amp; Restore</h2>
                     <p>
-                      Export or restore browser-only records. MongoDB data is not included.
+                      Legacy browser-only records.
+                      MongoDB data is not included.
                     </p>
                   </div>
                 </div>
@@ -998,10 +1102,11 @@ export default function Settings() {
                     <div>
                       <h3>
                         <Download size={18} />
-                        Export Workspace Backup
+                        Export Browser Backup
                       </h3>
                       <p>
-                        Download local settings and browser records only. This is not a MongoDB backup.
+                        Download legacy browser records only.
+                        MongoDB records and settings are excluded.
                       </p>
                     </div>
 
@@ -1019,10 +1124,11 @@ export default function Settings() {
                     <div>
                       <h3>
                         <Upload size={18} />
-                        Restore Workspace Backup
+                        Restore Browser Backup
                       </h3>
                       <p>
-                        Restore browser-local data from a compatible WEBRO Management backup file. MongoDB is unaffected.
+                        Restore legacy browser data from a
+                        compatible JSON backup. MongoDB is unaffected.
                       </p>
                     </div>
 
@@ -1055,50 +1161,44 @@ export default function Settings() {
                   </div>
 
                   <div>
-                    <h2>Module Data Management</h2>
+                    <h2>Legacy Browser Data</h2>
                     <p>
-                      Review and delete individual
-                      module records.
+                      Review or clear records stored on this device.
+                      This does not delete MongoDB data.
                     </p>
                   </div>
                 </div>
 
                 <div className="settings-page__module-list">
-                  {Object.keys(MODULE_KEYS).map(
-                    (name) => (
-                      <div
-                        className="settings-page__module"
-                        key={name}
-                      >
-                        <div>
-                          <strong>
-                            {name === "followups"
-                              ? "Follow-ups"
-                              : name.charAt(0).toUpperCase() +
-                                name.slice(1)}
-                          </strong>
+                  {Object.keys(MODULE_KEYS).map((name) => (
+                    <div
+                      className="settings-page__module"
+                      key={name}
+                    >
+                      <div>
+                        <strong>
+                          {name === "followups"
+                            ? "Follow-ups"
+                            : name.charAt(0).toUpperCase() +
+                              name.slice(1)}
+                        </strong>
 
-                          <span>
-                            {recordCounts[name] || 0} records
-                          </span>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            clearModule(name)
-                          }
-                          disabled={
-                            !recordCounts[name]
-                          }
-                          aria-label={`Delete all ${name} records`}
-                        >
-                          <Trash2 size={16} />
-                          Clear
-                        </button>
+                        <span>
+                          {recordCounts[name] || 0} local records
+                        </span>
                       </div>
-                    )
-                  )}
+
+                      <button
+                        type="button"
+                        onClick={() => clearModule(name)}
+                        disabled={!recordCounts[name]}
+                        aria-label={`Clear local ${name} records`}
+                      >
+                        <Trash2 size={16} />
+                        Clear
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </section>
 
@@ -1109,9 +1209,9 @@ export default function Settings() {
                   </div>
 
                   <div>
-                    <h2>Reset Settings</h2>
+                    <h2>Reset Personal Settings</h2>
                     <p>
-                      Restore workspace preferences
+                      Restore your preferences and notifications
                       to default values.
                     </p>
                   </div>
@@ -1119,19 +1219,19 @@ export default function Settings() {
 
                 <div className="settings-page__reset">
                   <p>
-                    This resets company information,
-                    preferences and notification
-                    settings. Module records remain
-                    unchanged.
+                    Reset personal settings in MongoDB.
+                    Company information and module records
+                    will remain unchanged.
                   </p>
 
                   <button
                     type="button"
                     className="settings-page__button settings-page__button--danger"
                     onClick={resetSettings}
+                    disabled={saving || loading || !role}
                   >
                     <RotateCcw size={16} />
-                    Reset Settings
+                    {saving ? "Resetting..." : "Reset Settings"}
                   </button>
                 </div>
               </section>
@@ -1148,7 +1248,7 @@ export default function Settings() {
 
         <span>
           <Clock3 size={15} />
-          Local Storage Mode
+          MongoDB Settings Mode
         </span>
       </div>
     </div>

@@ -57,6 +57,8 @@ const EMPTY_FORM = {
   notes: "",
 };
 
+const PAGE_SIZE = 10;
+
 const currency = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -64,7 +66,10 @@ const currency = (value) =>
     maximumFractionDigits: 0,
   }).format(Number(value) || 0);
 
-const getId = (item) => item?.id || item?._id;
+const getId = (value) => {
+  if (typeof value === "string") return value;
+  return value?._id || value?.id || "";
+};
 
 const getDate = (value) => {
   if (!value) return "";
@@ -73,11 +78,18 @@ const getDate = (value) => {
 
 const getEmployeeName = (value) => {
   if (!value) return "Unassigned";
+
   if (typeof value === "object") {
     return value.name || "Unassigned";
   }
+
   return "Assigned";
 };
+
+const getErrorMessage = (error) =>
+  error instanceof Error
+    ? error.message
+    : "Something went wrong.";
 
 class ApiError extends Error {
   constructor(message, status = 0) {
@@ -87,22 +99,38 @@ class ApiError extends Error {
   }
 }
 
-async function apiRequest(path, options = {}) {
+async function apiRequest(
+  path,
+  {
+    method = "GET",
+    body,
+    signal,
+    headers = {},
+  } = {}
+) {
   let response;
 
   try {
     response = await fetch(`${API_URL}${path}`, {
+      method,
       credentials: "include",
-      ...options,
+      signal,
       headers: {
         Accept: "application/json",
-        ...(options.body !== undefined
+        ...(body !== undefined
           ? { "Content-Type": "application/json" }
           : {}),
-        ...options.headers,
+        ...headers,
       },
+      ...(body !== undefined
+        ? { body: JSON.stringify(body) }
+        : {}),
     });
-  } catch {
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw error;
+    }
+
     throw new ApiError(
       "Cannot connect to backend. Check server and API URL."
     );
@@ -110,16 +138,12 @@ async function apiRequest(path, options = {}) {
 
   const data = await response.json().catch(() => null);
 
-  if (!response.ok || data?.success === false) {
+  if (!response.ok || data?.success !== true) {
     throw new ApiError(
       data?.message ||
         `Request failed (${response.status})`,
       response.status
     );
-  }
-
-  if (!data) {
-    throw new ApiError("Invalid server response.");
   }
 
   return data;
@@ -128,33 +152,62 @@ async function apiRequest(path, options = {}) {
 async function apiMutation(path, method, payload) {
   const csrfResponse = await apiRequest("/auth/csrf");
 
-  if (!csrfResponse.csrfToken) {
-    throw new ApiError("CSRF token unavailable. Log in again.");
+  const csrfToken = csrfResponse.csrfToken;
+
+  if (
+    typeof csrfToken !== "string" ||
+    !csrfToken
+  ) {
+    throw new ApiError(
+      "CSRF token unavailable. Please log in again."
+    );
   }
 
   return apiRequest(path, {
     method,
     headers: {
-      "X-CSRF-Token": csrfResponse.csrfToken,
+      "X-CSRF-Token": csrfToken,
     },
     ...(payload !== undefined
-      ? { body: JSON.stringify(payload) }
+      ? { body: payload }
       : {}),
   });
 }
 
 const clientApi = {
-  list(params = {}) {
-    const query = new URLSearchParams(params);
-    return apiRequest(`/clients?${query.toString()}`);
+  list(params = {}, signal) {
+    const query = new URLSearchParams();
+
+    Object.entries(params).forEach(([key, value]) => {
+      if (
+        value !== undefined &&
+        value !== null &&
+        value !== ""
+      ) {
+        query.set(key, String(value));
+      }
+    });
+
+    const suffix = query.toString();
+
+    return apiRequest(
+      `/clients${suffix ? `?${suffix}` : ""}`,
+      { signal }
+    );
   },
 
-  stats() {
-    return apiRequest("/clients/stats");
+  stats(signal) {
+    return apiRequest("/clients/stats", {
+      signal,
+    });
   },
 
   create(payload) {
-    return apiMutation("/clients", "POST", payload);
+    return apiMutation(
+      "/clients",
+      "POST",
+      payload
+    );
   },
 
   update(id, payload) {
@@ -184,10 +237,7 @@ function ClientModal({
       ? {
           ...EMPTY_FORM,
           ...client,
-          assignedTo:
-            typeof client.assignedTo === "object"
-              ? getId(client.assignedTo)
-              : client.assignedTo,
+          assignedTo: getId(client.assignedTo) || null,
           startDate: getDate(client.startDate),
           deadline: getDate(client.deadline),
           contractAmount: String(
@@ -201,6 +251,26 @@ function ClientModal({
   );
 
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const onEscape = (event) => {
+      if (event.key === "Escape" && !saving) {
+        onClose();
+      }
+    };
+
+    document.addEventListener(
+      "keydown",
+      onEscape
+    );
+
+    return () => {
+      document.removeEventListener(
+        "keydown",
+        onEscape
+      );
+    };
+  }, [onClose, saving]);
 
   const change = (event) => {
     const { name, value } = event.target;
@@ -216,23 +286,32 @@ function ClientModal({
   const submit = async (event) => {
     event.preventDefault();
 
+    if (saving) return;
+
     const name = form.name.trim();
+    const company = form.company.trim();
     const phone = form.phone.trim();
     const email = form.email.trim().toLowerCase();
+
     const contractAmount = Number(
       form.contractAmount || 0
     );
+
     const receivedAmount = Number(
       form.receivedAmount || 0
     );
 
     if (name.length < 2) {
-      setError("Client name must contain at least 2 characters.");
+      setError(
+        "Client name must contain at least 2 characters."
+      );
       return;
     }
 
     if (!/^[6-9]\d{9}$/.test(phone)) {
-      setError("Enter a valid 10-digit Indian mobile number.");
+      setError(
+        "Enter a valid 10-digit Indian mobile number."
+      );
       return;
     }
 
@@ -256,6 +335,22 @@ function ClientModal({
       return;
     }
 
+    if (
+      Math.abs(
+        contractAmount * 100 -
+          Math.round(contractAmount * 100)
+      ) > 0.00001 ||
+      Math.abs(
+        receivedAmount * 100 -
+          Math.round(receivedAmount * 100)
+      ) > 0.00001
+    ) {
+      setError(
+        "Payment amounts can have at most two decimal places."
+      );
+      return;
+    }
+
     if (receivedAmount > contractAmount) {
       setError(
         "Received amount cannot exceed contract amount."
@@ -276,7 +371,7 @@ function ClientModal({
 
     const payload = {
       name,
-      company: form.company.trim(),
+      company,
       phone,
       email,
       service: form.service,
@@ -291,9 +386,10 @@ function ClientModal({
     };
 
     try {
+      setError("");
       await onSave(payload);
-    } catch (err) {
-      setError(err.message);
+    } catch (error) {
+      setError(getErrorMessage(error));
     }
   };
 
@@ -318,9 +414,14 @@ function ClientModal({
         <div className="clients__modal-header">
           <div>
             <h2 id="client-modal-title">
-              {client ? "Edit Client" : "Add New Client"}
+              {client
+                ? "Edit Client"
+                : "Add New Client"}
             </h2>
-            <p>Manage client and project information</p>
+
+            <p>
+              Manage client and project information
+            </p>
           </div>
 
           <button
@@ -414,7 +515,10 @@ function ClientModal({
                 onChange={change}
               >
                 {STATUS_OPTIONS.map((status) => (
-                  <option key={status} value={status}>
+                  <option
+                    key={status}
+                    value={status}
+                  >
                     {status}
                   </option>
                 ))}
@@ -437,12 +541,14 @@ function ClientModal({
               <input
                 value={
                   client
-                    ? getEmployeeName(client.assignedTo)
+                    ? getEmployeeName(
+                        client.assignedTo
+                      )
                     : "Unassigned"
                 }
                 readOnly
                 disabled
-                title="Employee assignment will be connected in the Employees module."
+                title="Assignment is read-only on this page."
               />
             </label>
 
@@ -544,8 +650,16 @@ function ClientModal({
   );
 }
 
-export default function Clients() {
+export default function Clients({ user }) {
+  const canManageClients =
+    user?.role === "admin" ||
+    user?.role === "manager";
+
+  const canDeleteClients =
+    user?.role === "admin";
+
   const [clients, setClients] = useState([]);
+
   const [stats, setStats] = useState({
     totalClients: 0,
     activeClients: 0,
@@ -555,8 +669,11 @@ export default function Clients() {
   });
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All");
+  const [statusFilter, setStatusFilter] =
+    useState("All");
+
   const [page, setPage] = useState(1);
+
   const [pagination, setPagination] = useState({
     total: 0,
     totalPages: 0,
@@ -564,45 +681,31 @@ export default function Clients() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] =
+    useState("");
+
   const [error, setError] = useState("");
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingClient, setEditingClient] = useState(null);
+  const [modalOpen, setModalOpen] =
+    useState(false);
 
-  const loadClients = useCallback(
-    async (signal) => {
-      const params = {
-        page,
-        limit: 10,
-        search: search.trim(),
-      };
+  const [editingClient, setEditingClient] =
+    useState(null);
 
-      if (statusFilter !== "All") {
-        params.status = statusFilter;
-      }
+  const [refreshKey, setRefreshKey] =
+    useState(0);
 
-      const response = await clientApi.list(params);
-
-      if (signal?.aborted) return;
-
-      setClients(response.clients || []);
-      setPagination(
-        response.pagination || {
-          total: 0,
-          totalPages: 0,
-        }
-      );
-    },
-    [page, search, statusFilter]
-  );
-
-  const loadStats = useCallback(async () => {
-    const response = await clientApi.stats();
-    setStats(response.stats);
+  const refreshClients = useCallback(() => {
+    setRefreshKey((value) => value + 1);
   }, []);
 
   useEffect(() => {
+    if (!canManageClients) {
+      setClients([]);
+      setLoading(false);
+      return;
+    }
+
     const controller = new AbortController();
-    let active = true;
 
     const load = async () => {
       setLoading(true);
@@ -611,7 +714,7 @@ export default function Clients() {
       try {
         const params = {
           page,
-          limit: 10,
+          limit: PAGE_SIZE,
           search: search.trim(),
         };
 
@@ -619,48 +722,78 @@ export default function Clients() {
           params.status = statusFilter;
         }
 
-        const response = await clientApi.list(params);
+        const response = await clientApi.list(
+          params,
+          controller.signal
+        );
 
-        if (!active) return;
+        if (controller.signal.aborted) return;
 
         setClients(response.clients || []);
-        setPagination(response.pagination || {
-          total: 0,
-          totalPages: 0,
-        });
-      } catch (err) {
-        if (active) {
-          setError(err.message);
+
+        setPagination(
+          response.pagination || {
+            total: 0,
+            totalPages: 0,
+          }
+        );
+      } catch (error) {
+        if (
+          !controller.signal.aborted &&
+          error?.name !== "AbortError"
+        ) {
+          setError(getErrorMessage(error));
         }
       } finally {
-        if (active) setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    load();
+    void load();
 
     return () => {
-      active = false;
       controller.abort();
     };
-  }, [page, search, statusFilter]);
+  }, [
+    page,
+    search,
+    statusFilter,
+    refreshKey,
+    canManageClients,
+  ]);
 
   useEffect(() => {
-    let active = true;
+    if (!canManageClients) return;
 
-    clientApi
-      .stats()
-      .then((response) => {
-        if (active) setStats(response.stats);
-      })
-      .catch((err) => {
-        if (active) setError(err.message);
-      });
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        const response = await clientApi.stats(
+          controller.signal
+        );
+
+        if (!controller.signal.aborted) {
+          setStats(response.stats);
+        }
+      } catch (error) {
+        if (
+          !controller.signal.aborted &&
+          error?.name !== "AbortError"
+        ) {
+          setError(getErrorMessage(error));
+        }
+      }
+    };
+
+    void load();
 
     return () => {
-      active = false;
+      controller.abort();
     };
-  }, []);
+  }, [refreshKey, canManageClients]);
 
   const cards = useMemo(
     () => [
@@ -676,17 +809,23 @@ export default function Clients() {
       },
       {
         label: "Contract Value",
-        value: currency(stats.totalContractAmount),
+        value: currency(
+          stats.totalContractAmount
+        ),
         icon: IndianRupee,
       },
       {
         label: "Payments Received",
-        value: currency(stats.totalReceivedAmount),
+        value: currency(
+          stats.totalReceivedAmount
+        ),
         icon: Wallet,
       },
       {
         label: "Pending Payments",
-        value: currency(stats.totalPendingAmount),
+        value: currency(
+          stats.totalPendingAmount
+        ),
         icon: IndianRupee,
       },
     ],
@@ -694,22 +833,33 @@ export default function Clients() {
   );
 
   const openAdd = () => {
+    if (!canManageClients || saving) return;
+
     setEditingClient(null);
     setModalOpen(true);
   };
 
   const openEdit = (client) => {
+    if (!canManageClients || saving) return;
+
     setEditingClient(client);
     setModalOpen(true);
   };
 
   const closeModal = () => {
     if (saving) return;
+
     setModalOpen(false);
     setEditingClient(null);
   };
 
   const saveClient = async (payload) => {
+    if (!canManageClients) {
+      throw new Error(
+        "Admin or Manager access required."
+      );
+    }
+
     setSaving(true);
 
     try {
@@ -722,44 +872,84 @@ export default function Clients() {
         await clientApi.create(payload);
       }
 
-      await Promise.all([
-        loadClients(),
-        loadStats(),
-      ]);
-
       setModalOpen(false);
       setEditingClient(null);
       setError("");
-    } catch (err) {
-      setError(err.message);
-      throw err;
+
+      refreshClients();
+    } catch (error) {
+      setError(getErrorMessage(error));
+      throw error;
     } finally {
       setSaving(false);
     }
   };
 
   const deleteClient = async (client) => {
+    if (
+      !canDeleteClients ||
+      deletingId ||
+      saving
+    ) {
+      return;
+    }
+
     const confirmed = window.confirm(
       `Delete client "${client.name}"? This action cannot be undone.`
     );
 
     if (!confirmed) return;
 
-    try {
-      await clientApi.remove(getId(client));
+    const id = getId(client);
 
-      if (clients.length === 1 && page > 1) {
+    try {
+      setDeletingId(id);
+      setError("");
+
+      await clientApi.remove(id);
+
+      if (
+        clients.length === 1 &&
+        page > 1
+      ) {
         setPage((previous) => previous - 1);
       } else {
-        await loadClients();
+        refreshClients();
       }
-
-      await loadStats();
-      setError("");
-    } catch (err) {
-      setError(err.message);
+    } catch (error) {
+      setError(getErrorMessage(error));
+    } finally {
+      setDeletingId("");
     }
   };
+
+  if (!canManageClients) {
+    return (
+      <div className="clients">
+        <div className="clients__header">
+          <div>
+            <span className="clients__eyebrow">
+              BUSINESS MANAGEMENT
+            </span>
+
+            <h1>Clients Management</h1>
+
+            <p>
+              You do not have permission to
+              access client records.
+            </p>
+          </div>
+        </div>
+
+        <div
+          className="clients__error"
+          role="alert"
+        >
+          Admin or Manager access required.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="clients">
@@ -781,6 +971,7 @@ export default function Clients() {
           type="button"
           className="clients__button clients__button--primary"
           onClick={openAdd}
+          disabled={saving || Boolean(deletingId)}
         >
           <Plus size={18} />
           Add New Client
@@ -788,19 +979,27 @@ export default function Clients() {
       </div>
 
       {error && (
-        <div className="clients__error" role="alert">
+        <div
+          className="clients__error"
+          role="alert"
+        >
           {error}
         </div>
       )}
 
       <div className="clients__stats">
-        {cards.map(({ label, value, icon: Icon }) => (
-          <div className="clients__stat" key={label}>
-            <Icon size={21} />
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+        {cards.map(
+          ({ label, value, icon: Icon }) => (
+            <div
+              className="clients__stat"
+              key={label}
+            >
+              <Icon size={21} />
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          )
+        )}
       </div>
 
       <section className="clients__panel">
@@ -826,15 +1025,22 @@ export default function Clients() {
             <select
               value={statusFilter}
               onChange={(event) => {
-                setStatusFilter(event.target.value);
+                setStatusFilter(
+                  event.target.value
+                );
                 setPage(1);
               }}
               aria-label="Filter clients by status"
             >
-              <option value="All">All Statuses</option>
+              <option value="All">
+                All Statuses
+              </option>
 
               {STATUS_OPTIONS.map((status) => (
-                <option key={status} value={status}>
+                <option
+                  key={status}
+                  value={status}
+                >
                   {status}
                 </option>
               ))}
@@ -859,138 +1065,187 @@ export default function Clients() {
             </thead>
 
             <tbody>
-              {clients.map((client) => {
-                const pending = Math.max(
-                  0,
-                  Number(client.contractAmount || 0) -
-                    Number(client.receivedAmount || 0)
-                );
+              {!loading &&
+                clients.map((client) => {
+                  const pending = Math.max(
+                    0,
+                    Number(
+                      client.contractAmount || 0
+                    ) -
+                      Number(
+                        client.receivedAmount || 0
+                      )
+                  );
 
-                return (
-                  <tr key={getId(client)}>
-                    <td>
-                      <div className="clients__identity">
-                        <span className="clients__avatar">
-                          {client.name?.charAt(0)?.toUpperCase() || "C"}
-                        </span>
+                  return (
+                    <tr key={getId(client)}>
+                      <td>
+                        <div className="clients__identity">
+                          <span className="clients__avatar">
+                            {client.name
+                              ?.charAt(0)
+                              ?.toUpperCase() || "C"}
+                          </span>
 
-                        <div>
-                          <strong>{client.name}</strong>
+                          <div>
+                            <strong>
+                              {client.name}
+                            </strong>
+
+                            <small>
+                              <Building2 size={12} />
+                              {client.company ||
+                                "Individual"}
+                            </small>
+                          </div>
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="clients__contact">
+                          <a
+                            href={`tel:${client.phone}`}
+                          >
+                            <Phone size={13} />
+                            {client.phone}
+                          </a>
+
+                          {client.email && (
+                            <a
+                              href={`mailto:${client.email}`}
+                            >
+                              <Mail size={13} />
+                              {client.email}
+                            </a>
+                          )}
+                        </div>
+                      </td>
+
+                      <td>
+                        <div className="clients__project">
+                          <strong>
+                            {client.projectName ||
+                              "Not assigned"}
+                          </strong>
+
                           <small>
-                            <Building2 size={12} />
-                            {client.company || "Individual"}
+                            {client.service}
                           </small>
                         </div>
-                      </div>
-                    </td>
+                      </td>
 
-                    <td>
-                      <div className="clients__contact">
-                        <a href={`tel:${client.phone}`}>
-                          <Phone size={13} />
-                          {client.phone}
-                        </a>
+                      <td>
+                        <span
+                          className={`clients__badge clients__badge--${String(
+                            client.status || "Active"
+                          )
+                            .toLowerCase()
+                            .replace(/\s+/g, "-")}`}
+                        >
+                          {client.status}
+                        </span>
+                      </td>
 
-                        {client.email && (
-                          <a href={`mailto:${client.email}`}>
-                            <Mail size={13} />
-                            {client.email}
-                          </a>
+                      <td>
+                        {getEmployeeName(
+                          client.assignedTo
                         )}
-                      </div>
-                    </td>
+                      </td>
 
-                    <td>
-                      <div className="clients__project">
-                        <strong>
-                          {client.projectName || "Not assigned"}
-                        </strong>
-                        <small>{client.service}</small>
-                      </div>
-                    </td>
+                      <td className="clients__amount">
+                        {currency(
+                          client.contractAmount
+                        )}
+                      </td>
 
-                    <td>
-                      <span
-                        className={`clients__badge clients__badge--${client.status
-                          .toLowerCase()
-                          .replace(/\s+/g, "-")}`}
-                      >
-                        {client.status}
-                      </span>
-                    </td>
+                      <td className="clients__amount clients__amount--received">
+                        {currency(
+                          client.receivedAmount
+                        )}
+                      </td>
 
-                    <td>
-                      {getEmployeeName(client.assignedTo)}
-                    </td>
+                      <td className="clients__amount clients__amount--pending">
+                        {currency(pending)}
+                      </td>
 
-                    <td className="clients__amount">
-                      {currency(client.contractAmount)}
-                    </td>
+                      <td>
+                        <div className="clients__actions">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openEdit(client)
+                            }
+                            title="Edit client"
+                            aria-label={`Edit ${client.name}`}
+                            disabled={
+                              saving ||
+                              Boolean(deletingId)
+                            }
+                          >
+                            <Pencil size={16} />
+                          </button>
 
-                    <td className="clients__amount clients__amount--received">
-                      {currency(client.receivedAmount)}
-                    </td>
+                          {canDeleteClients && (
+                            <button
+                              type="button"
+                              className="clients__delete"
+                              onClick={() =>
+                                void deleteClient(
+                                  client
+                                )
+                              }
+                              title="Delete client"
+                              aria-label={`Delete ${client.name}`}
+                              disabled={
+                                saving ||
+                                Boolean(deletingId)
+                              }
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          )}
 
-                    <td className="clients__amount clients__amount--pending">
-                      {currency(pending)}
-                    </td>
+                          <a
+                            href={`tel:${client.phone}`}
+                            title="Call client"
+                            aria-label={`Call ${client.name}`}
+                          >
+                            <ExternalLink size={16} />
+                          </a>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
 
-                    <td>
-                      <div className="clients__actions">
+              {!loading &&
+                clients.length === 0 && (
+                  <tr>
+                    <td colSpan={9}>
+                      <div className="clients__empty">
+                        <UsersRound size={35} />
+
+                        <h3>
+                          No clients found
+                        </h3>
+
+                        <p>
+                          Add your first client
+                          to get started.
+                        </p>
+
                         <button
                           type="button"
-                          onClick={() => openEdit(client)}
-                          title="Edit client"
-                          aria-label={`Edit ${client.name}`}
+                          className="clients__button clients__button--primary"
+                          onClick={openAdd}
                         >
-                          <Pencil size={16} />
+                          <Plus size={16} />
+                          Add Client
                         </button>
-
-                        <button
-                          type="button"
-                          className="clients__delete"
-                          onClick={() => deleteClient(client)}
-                          title="Delete client"
-                          aria-label={`Delete ${client.name}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
-
-                        <a
-                          href={`tel:${client.phone}`}
-                          title="Call client"
-                          aria-label={`Call ${client.name}`}
-                        >
-                          <ExternalLink size={16} />
-                        </a>
                       </div>
                     </td>
                   </tr>
-                );
-              })}
-
-              {!loading && clients.length === 0 && (
-                <tr>
-                  <td colSpan={9}>
-                    <div className="clients__empty">
-                      <UsersRound size={35} />
-                      <h3>No clients found</h3>
-                      <p>
-                        Add your first client to get started.
-                      </p>
-
-                      <button
-                        type="button"
-                        className="clients__button clients__button--primary"
-                        onClick={openAdd}
-                      >
-                        <Plus size={16} />
-                        Add Client
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              )}
+                )}
 
               {loading && (
                 <tr>
@@ -1007,21 +1262,32 @@ export default function Clients() {
 
         <div className="clients__table-footer">
           <span>
-            Showing {clients.length} of {pagination.total} clients
+            Showing {clients.length} of{" "}
+            {pagination.total} clients
           </span>
 
           <div className="clients__modal-actions">
             <button
               type="button"
               className="clients__button clients__button--secondary"
-              disabled={page <= 1 || loading}
-              onClick={() => setPage((p) => p - 1)}
+              disabled={
+                page <= 1 || loading
+              }
+              onClick={() =>
+                setPage((previous) =>
+                  previous - 1
+                )
+              }
             >
               Previous
             </button>
 
             <span>
-              Page {page} of {Math.max(1, pagination.totalPages)}
+              Page {page} of{" "}
+              {Math.max(
+                1,
+                pagination.totalPages
+              )}
             </span>
 
             <button
@@ -1029,9 +1295,14 @@ export default function Clients() {
               className="clients__button clients__button--secondary"
               disabled={
                 loading ||
-                page >= pagination.totalPages
+                page >=
+                  pagination.totalPages
               }
-              onClick={() => setPage((p) => p + 1)}
+              onClick={() =>
+                setPage((previous) =>
+                  previous + 1
+                )
+              }
             >
               Next
             </button>

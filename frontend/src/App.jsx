@@ -43,23 +43,211 @@ const API_URL = (
   "http://localhost:5000/api"
 ).replace(/\/+$/, "");
 
-// ================= APP =================
+// ================= ROLE PERMISSIONS =================
+
+const ALL_ROLES = ["admin", "manager", "employee"];
+const MANAGEMENT_ROLES = ["admin", "manager"];
+
+const ROUTE_CONFIG = [
+  {
+    path: "dashboard",
+    component: Dashboard,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "leads",
+    component: Leads,
+    roles: ALL_ROLES,
+  },
+  {
+    path: "clients",
+    component: Clients,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "calling",
+    component: Calling,
+    roles: ALL_ROLES,
+  },
+  {
+    path: "follow-ups",
+    component: FollowUps,
+    roles: ALL_ROLES,
+  },
+  {
+    path: "projects",
+    component: Projects,
+    roles: ALL_ROLES,
+  },
+  {
+    path: "payments",
+    component: Payments,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "invoices",
+    component: Invoices,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "employees",
+    component: Employees,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "tasks",
+    component: Tasks,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "calendar",
+    component: Calendar,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "reports",
+    component: Reports,
+    roles: MANAGEMENT_ROLES,
+  },
+  {
+    path: "settings",
+    component: Settings,
+    roles: MANAGEMENT_ROLES,
+  },
+];
+
+// ================= ROLE HELPERS =================
+
+function getDefaultRoute(user) {
+  if (user?.role === "employee") {
+    return "/leads";
+  }
+
+  return "/dashboard";
+}
+
+function hasRouteAccess(user, allowedRoles) {
+  if (!user || !Array.isArray(allowedRoles)) {
+    return false;
+  }
+
+  return allowedRoles.includes(user.role);
+}
+
+// ================= PROTECTED PAGE =================
+
+function ProtectedPage({
+  user,
+  roles,
+  component: Component,
+}) {
+  if (!hasRouteAccess(user, roles)) {
+    return (
+      <Navigate
+        to={getDefaultRoute(user)}
+        replace
+      />
+    );
+  }
+
+  return <Component user={user} />;
+}
+
+// ================= LOADING SCREEN =================
+
+function LoadingScreen() {
+  return (
+    <div
+      role="status"
+      style={{
+        minHeight: "100vh",
+        display: "grid",
+        placeItems: "center",
+        background: "#f5f8f6",
+        color: "#087f5b",
+        fontFamily: "sans-serif",
+        fontSize: "15px",
+        fontWeight: 500,
+      }}
+    >
+      Verifying your session...
+    </div>
+  );
+}
+
+// ================= SESSION ERROR SCREEN =================
+
+function SessionErrorScreen({ onRetry }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        minHeight: "100vh",
+        display: "grid",
+        placeItems: "center",
+        padding: "24px",
+        textAlign: "center",
+        background: "#f5f8f6",
+        fontFamily: "sans-serif",
+      }}
+    >
+      <div>
+        <h2>Unable to verify session</h2>
+
+        <p>
+          Check your backend connection and
+          try again.
+        </p>
+
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            marginTop: "16px",
+            padding: "10px 20px",
+            border: "none",
+            borderRadius: "8px",
+            background: "#087f5b",
+            color: "#fff",
+            cursor: "pointer",
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ================= MAIN APP =================
 
 export default function App() {
   const location = useLocation();
 
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // ================= UI STATE =================
+
+  const [sidebarOpen, setSidebarOpen] =
+    useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(false);
 
+  // ================= AUTH STATE =================
+
   const [user, setUser] = useState(null);
 
-  const [authStatus, setAuthStatus] = useState("loading");
+  const [authStatus, setAuthStatus] =
+    useState("loading");
+
+  const [sessionRetryKey, setSessionRetryKey] =
+    useState(0);
 
   const sidebarWidth = sidebarCollapsed
     ? "76px"
     : "260px";
+
+  const isLoginRoute =
+    location.pathname === "/login";
 
   // ================= SESSION CHECK =================
 
@@ -80,6 +268,10 @@ export default function App() {
           }
         );
 
+        if (controller.signal.aborted) {
+          return;
+        }
+
         if (response.status === 401) {
           setUser(null);
           setAuthStatus("unauthenticated");
@@ -88,36 +280,52 @@ export default function App() {
 
         if (!response.ok) {
           throw new Error(
-            "Unable to verify your session"
+            `Session verification failed (${response.status})`
           );
         }
 
         const data = await response.json();
 
-        if (!data.success || !data.user) {
+        if (
+          !data?.success ||
+          !data?.user ||
+          !ALL_ROLES.includes(data.user.role)
+        ) {
           throw new Error(
-            "Invalid session response"
+            "Invalid authenticated user response."
           );
+        }
+
+        if (controller.signal.aborted) {
+          return;
         }
 
         setUser(data.user);
         setAuthStatus("authenticated");
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (
+          controller.signal.aborted ||
+          error?.name === "AbortError"
+        ) {
+          return;
+        }
 
         console.error(
           "Session verification failed:",
           error
         );
 
+        setUser(null);
         setAuthStatus("error");
       }
     };
 
-    checkSession();
+    void checkSession();
 
-    return () => controller.abort();
-  }, [location.pathname === "/login"]);
+    return () => {
+      controller.abort();
+    };
+  }, [isLoginRoute, sessionRetryKey]);
 
   // ================= SIDEBAR HANDLERS =================
 
@@ -133,65 +341,53 @@ export default function App() {
     setSidebarCollapsed((previous) => !previous);
   };
 
-  // ================= LOADING =================
+  // ================= SESSION RETRY =================
+
+  const handleSessionRetry = () => {
+    setAuthStatus("loading");
+
+    setSessionRetryKey(
+      (previous) => previous + 1
+    );
+  };
+
+  // ================= AUTH LOADING =================
 
   if (authStatus === "loading") {
-    return (
-      <div
-        role="status"
-        style={{
-          minHeight: "100vh",
-          display: "grid",
-          placeItems: "center",
-          background: "#f5f8f6",
-          color: "#087f5b",
-          fontFamily: "sans-serif",
-        }}
-      >
-        Verifying your session...
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
-  // ================= SESSION ERROR =================
+  // ================= AUTH ERROR =================
 
   if (authStatus === "error") {
     return (
-      <div
-        role="alert"
-        style={{
-          minHeight: "100vh",
-          display: "grid",
-          placeItems: "center",
-          padding: "24px",
-          textAlign: "center",
-        }}
-      >
-        <div>
-          <h2>Unable to verify session</h2>
-          <p>
-            Check your backend connection and try again.
-          </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-          >
-            Retry
-          </button>
-        </div>
-      </div>
+      <SessionErrorScreen
+        onRetry={handleSessionRetry}
+      />
     );
   }
 
-  // ================= LOGIN ROUTE =================
+  // ================= UNAUTHENTICATED =================
 
-  if (authStatus === "unauthenticated") {
+  if (
+    authStatus === "unauthenticated" ||
+    !user
+  ) {
     return (
       <Routes>
-        <Route path="/login" element={<Login />} />
+        <Route
+          path="/login"
+          element={<Login />}
+        />
+
         <Route
           path="*"
-          element={<Navigate to="/login" replace />}
+          element={
+            <Navigate
+              to="/login"
+              replace
+            />
+          }
         />
       </Routes>
     );
@@ -199,11 +395,18 @@ export default function App() {
 
   // ================= AUTHENTICATED APP =================
 
+  const defaultRoute = getDefaultRoute(user);
+
   return (
     <Routes>
       <Route
         path="/login"
-        element={<Navigate to="/dashboard" replace />}
+        element={
+          <Navigate
+            to={defaultRoute}
+            replace
+          />
+        }
       />
 
       <Route
@@ -212,94 +415,80 @@ export default function App() {
           <div
             className="webro-app"
             style={{
-              "--current-sidebar-width": sidebarWidth,
+              "--current-sidebar-width":
+                sidebarWidth,
             }}
           >
+            {/* ================= SIDEBAR ================= */}
+
             <Sidebar
+              user={user}
               isOpen={sidebarOpen}
               onClose={handleSidebarClose}
               collapsed={sidebarCollapsed}
-              onToggleCollapse={handleSidebarCollapse}
+              onToggleCollapse={
+                handleSidebarCollapse
+              }
             />
 
+            {/* ================= MAIN ================= */}
+
             <div className="webro-app__main">
-              <Header onMenuClick={handleSidebarOpen} />
+              <Header
+                user={user}
+                onMenuClick={
+                  handleSidebarOpen
+                }
+              />
 
               <main className="webro-app__content">
                 <Routes>
+                  {/* DEFAULT ROUTE */}
+
                   <Route
                     index
-                    element={<Navigate to="/dashboard" replace />}
+                    element={
+                      <Navigate
+                        to={defaultRoute}
+                        replace
+                      />
+                    }
                   />
 
-                  <Route
-                    path="dashboard"
-                    element={<Dashboard />}
-                  />
+                  {/* PROTECTED MODULE ROUTES */}
 
-                  <Route
-                    path="leads"
-                    element={<Leads />}
-                  />
+                  {ROUTE_CONFIG.map(
+                    ({
+                      path,
+                      component,
+                      roles,
+                    }) => (
+                      <Route
+                        key={path}
+                        path={path}
+                        element={
+                          <ProtectedPage
+                            user={user}
+                            roles={roles}
+                            component={
+                              component
+                            }
+                          />
+                        }
+                      />
+                    )
+                  )}
 
-                  <Route
-                    path="clients"
-                    element={<Clients />}
-                  />
-
-                  <Route
-                    path="calling"
-                    element={<Calling />}
-                  />
-
-                  <Route
-                    path="follow-ups"
-                    element={<FollowUps />}
-                  />
-
-                  <Route
-                    path="projects"
-                    element={<Projects />}
-                  />
-
-                  <Route
-                    path="payments"
-                    element={<Payments />}
-                  />
-
-                  <Route
-                    path="invoices"
-                    element={<Invoices />}
-                  />
-
-                  <Route
-                    path="employees"
-                    element={<Employees />}
-                  />
-
-                  <Route
-                    path="tasks"
-                    element={<Tasks />}
-                  />
-
-                  <Route
-                    path="calendar"
-                    element={<Calendar />}
-                  />
-
-                  <Route
-                    path="reports"
-                    element={<Reports />}
-                  />
-
-                  <Route
-                    path="settings"
-                    element={<Settings />}
-                  />
+                  {/* UNKNOWN ROUTE */}
 
                   <Route
                     path="*"
-                    element={<Navigate to="/dashboard" replace />}
+                    element={
+                      <Navigate
+                        to={defaultRoute}
+                        replace
+                      />
+                    }
                   />
                 </Routes>
               </main>
