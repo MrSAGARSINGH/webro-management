@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Search,
@@ -20,38 +20,51 @@ import {
   UserRound,
 } from "lucide-react";
 
+import {
+  employeeApi,
+  toEmployeeISODate,
+} from "../../services/employeeApi.js";
+
 import "./Employees.scss";
 
-const STORAGE_KEY = "webro-management-employees-v1";
+// ======================================
+// Constants
+// ======================================
 
 const DEPARTMENTS = [
   "Development",
   "Design",
-  "Sales",
   "Marketing",
+  "Sales",
   "Operations",
+  "Human Resources",
+  "Finance",
   "Management",
-  "Support",
   "Other",
 ];
 
 const STATUSES = [
   "Active",
   "On Leave",
-  "Inactive",
+  "Notice Period",
+  "Resigned",
+  "Terminated",
 ];
 
 const EMPLOYMENT_TYPES = [
   "Full Time",
   "Part Time",
-  "Intern",
+  "Internship",
   "Contract",
+  "Freelance",
 ];
 
 const EMPTY_FORM = {
+  user: "",
   name: "",
   email: "",
   phone: "",
+  password: "",
   role: "",
   department: "Development",
   employmentType: "Full Time",
@@ -63,6 +76,12 @@ const EMPTY_FORM = {
   notes: "",
 };
 
+const PAGE_SIZE = 100;
+
+// ======================================
+// Helpers
+// ======================================
+
 const money = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -73,123 +92,265 @@ const money = (value) =>
 const formatDate = (value) => {
   if (!value) return "—";
 
-  const date = new Date(`${value}T12:00:00`);
+  const date = new Date(value);
 
-  if (Number.isNaN(date.getTime())) return "—";
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
 
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    timeZone: "UTC",
   }).format(date);
+};
+
+const dateInputValue = (value) => {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return date.toISOString().slice(0, 10);
 };
 
 const todayKey = () => {
   const date = new Date();
-  const pad = (number) => String(number).padStart(2, "0");
+
+  const pad = (number) =>
+    String(number).padStart(2, "0");
 
   return `${date.getFullYear()}-${pad(
     date.getMonth() + 1
   )}-${pad(date.getDate())}`;
 };
 
-function readEmployees() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw);
-
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (employee) =>
-            employee &&
-            typeof employee.id === "string" &&
-            typeof employee.name === "string"
-        )
-      : [];
-  } catch {
-    return [];
+const getId = (value) => {
+  if (typeof value === "string") {
+    return value;
   }
-}
+
+  return value?._id || value?.id || "";
+};
+
+const getErrorMessage = (error) =>
+  error instanceof Error
+    ? error.message
+    : "Something went wrong.";
+
+const mapEmployee = (employee) => {
+  const user =
+    employee.user &&
+    typeof employee.user === "object"
+      ? employee.user
+      : {};
+
+  return {
+    id: getId(employee),
+    userId: getId(employee.user),
+    employeeId: employee.employeeId || "",
+    name: user.name || "Unknown Employee",
+    email: user.email || "",
+    phone: user.phone || "",
+    role: employee.designation || "",
+    department: employee.department || "",
+    employmentType:
+      employee.employmentType || "Full Time",
+    status: employee.status || "Active",
+    joiningDate: dateInputValue(
+      employee.joiningDate
+    ),
+    monthlySalary:
+      employee.salary?.amount ?? null,
+    salaryType:
+      employee.salary?.type || "Monthly",
+    assignedProjects: null,
+    assignedTasks: null,
+    notes: employee.notes || "",
+  };
+};
+
+// ======================================
+// Employee Modal
+// ======================================
 
 function EmployeeModal({
   employee,
+  availableUsers,
   onClose,
   onSave,
 }) {
+  const isEditing = Boolean(employee);
+
+  const [accountMode, setAccountMode] =
+    useState("existing");
+
+  const [createdUserId, setCreatedUserId] =
+    useState("");
+
   const [form, setForm] = useState(() =>
     employee
       ? {
           ...EMPTY_FORM,
           ...employee,
-          monthlySalary: String(
-            employee.monthlySalary ?? ""
-          ),
+          user: employee.userId,
+          monthlySalary:
+            employee.monthlySalary === null
+              ? ""
+              : String(employee.monthlySalary),
         }
-      : EMPTY_FORM
+      : { ...EMPTY_FORM }
   );
 
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const handleEscape = (event) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !saving) {
+        onClose();
+      }
     };
 
-    document.addEventListener("keydown", handleEscape);
+    document.addEventListener(
+      "keydown",
+      handleEscape
+    );
 
-    return () =>
+    return () => {
       document.removeEventListener(
         "keydown",
         handleEscape
       );
-  }, [onClose]);
+    };
+  }, [onClose, saving]);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
 
-    setForm((previous) => ({
-      ...previous,
-      [name]: value,
-    }));
+    if (name === "user" && !isEditing) {
+      const selected = availableUsers.find(
+        (user) => getId(user) === value
+      );
+
+      setForm((previous) => ({
+        ...previous,
+        user: value,
+        name: selected?.name || "",
+        email: selected?.email || "",
+        phone: selected?.phone || "",
+      }));
+    } else {
+      setForm((previous) => ({
+        ...previous,
+        [name]: value,
+      }));
+    }
 
     setError("");
   };
 
-  const handleSubmit = (event) => {
+  const changeAccountMode = (mode) => {
+    if (saving || createdUserId) return;
+
+    setAccountMode(mode);
+    setError("");
+
+    setForm((previous) => ({
+      ...previous,
+      user: "",
+      name: "",
+      email: "",
+      phone: "",
+      password: "",
+    }));
+  };
+
+  const handleSubmit = async (event) => {
     event.preventDefault();
 
-    const name = form.name.trim();
-    const email = form.email.trim().toLowerCase();
-    const phone = form.phone.replace(/\D/g, "");
-    const role = form.role.trim();
+    if (saving) return;
 
-    if (!name || !role) {
-      setError("Employee name and role are required.");
-      return;
-    }
+    const creatingAccount =
+      !isEditing &&
+      accountMode === "new";
 
     if (
-      email &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+      !isEditing &&
+      !creatingAccount &&
+      !form.user
     ) {
-      setError("Enter a valid email address.");
-      return;
-    }
-
-    if (phone && !/^[6-9]\d{9}$/.test(phone)) {
       setError(
-        "Enter a valid 10-digit Indian mobile number."
+        "Please select an existing user account."
       );
       return;
     }
 
-    if (
-      form.joiningDate &&
-      form.joiningDate > todayKey()
-    ) {
+    if (creatingAccount && !createdUserId) {
+      if (form.name.trim().length < 2) {
+        setError(
+          "Employee name must contain at least 2 characters."
+        );
+        return;
+      }
+
+      const email = form.email.trim();
+
+      if (
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+          email
+        )
+      ) {
+        setError(
+          "Please enter a valid email address."
+        );
+        return;
+      }
+
+      if (
+        form.phone.trim() &&
+        !/^[6-9]\d{9}$/.test(
+          form.phone.trim()
+        )
+      ) {
+        setError(
+          "Enter a valid 10-digit Indian mobile number."
+        );
+        return;
+      }
+
+      if (
+        form.password.length < 12 ||
+        new TextEncoder().encode(
+          form.password
+        ).length > 72
+      ) {
+        setError(
+          "Password must be at least 12 characters and at most 72 UTF-8 bytes."
+        );
+        return;
+      }
+    }
+
+    const role = form.role.trim();
+
+    if (role.length < 2) {
+      setError(
+        "Employee job role must contain at least 2 characters."
+      );
+      return;
+    }
+
+    if (!form.joiningDate) {
+      setError("Joining date is required.");
+      return;
+    }
+
+    if (form.joiningDate > todayKey()) {
       setError(
         "Joining date cannot be in the future."
       );
@@ -198,60 +359,119 @@ function EmployeeModal({
 
     const salary =
       form.monthlySalary === ""
-        ? 0
+        ? null
         : Number(form.monthlySalary);
 
     if (
-      !Number.isFinite(salary) ||
-      salary < 0 ||
-      salary > 100000000 ||
-      !Number.isInteger(salary * 100)
-    ) {
-      setError("Enter a valid monthly salary.");
-      return;
-    }
-
-    const assignedProjects = Number(
-      form.assignedProjects || 0
-    );
-
-    const assignedTasks = Number(
-      form.assignedTasks || 0
-    );
-
-    if (
-      !Number.isInteger(assignedProjects) ||
-      assignedProjects < 0 ||
-      !Number.isInteger(assignedTasks) ||
-      assignedTasks < 0
+      salary !== null &&
+      (!Number.isFinite(salary) ||
+        salary < 0 ||
+        salary > 999999999999 ||
+        Math.abs(
+          salary * 100 -
+            Math.round(salary * 100)
+        ) > 0.00001)
     ) {
       setError(
-        "Assigned projects and tasks must be non-negative integers."
+        "Enter a valid monthly salary."
       );
       return;
     }
 
-    onSave({
-      name,
-      email,
-      phone,
-      role,
-      department: form.department,
-      employmentType: form.employmentType,
-      status: form.status,
-      joiningDate: form.joiningDate,
-      monthlySalary: salary,
-      assignedProjects,
-      assignedTasks,
-      notes: form.notes.trim(),
-    });
+    try {
+      setSaving(true);
+      setError("");
+
+      const profile = {
+        designation: role,
+        department: form.department,
+        employmentType:
+          form.employmentType,
+        joiningDate: toEmployeeISODate(
+          form.joiningDate
+        ),
+        notes: form.notes.trim(),
+      };
+
+      let userId = form.user;
+
+      if (creatingAccount) {
+        if (createdUserId) {
+          userId = createdUserId;
+        } else {
+          const userPayload = {
+            name: form.name.trim(),
+            email: form.email
+              .trim()
+              .toLowerCase(),
+            role: "employee",
+            password: form.password,
+          };
+
+          if (form.phone.trim()) {
+            userPayload.phone =
+              form.phone.trim();
+          }
+
+          const result =
+            await employeeApi.createUser(
+              userPayload
+            );
+
+          userId = getId(result?.user);
+
+          if (!userId) {
+            throw new Error(
+              "User creation response did not contain a user ID. Check the Users list before retrying."
+            );
+          }
+
+          // Preserve the newly created account
+          // if employee creation fails.
+          setCreatedUserId(userId);
+        }
+      }
+
+      if (!isEditing) {
+        profile.user = userId;
+
+        if (salary !== null) {
+          profile.salary = {
+            amount: salary,
+            currency: "INR",
+            type: "Monthly",
+          };
+        }
+      }
+
+      await onSave({
+        profile,
+        salary:
+          isEditing && salary !== null
+            ? {
+                amount: salary,
+                currency: "INR",
+                type: "Monthly",
+              }
+            : null,
+        status: form.status,
+      });
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div
       className="employees__modal-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
+        if (
+          event.target ===
+            event.currentTarget &&
+          !saving
+        ) {
           onClose();
         }
       }}
@@ -265,12 +485,14 @@ function EmployeeModal({
         <div className="employees__modal-header">
           <div>
             <h2 id="employee-modal-title">
-              {employee
+              {isEditing
                 ? "Edit Employee"
                 : "Add New Employee"}
             </h2>
+
             <p>
-              Manage employee details and work assignments.
+              Manage employee details and
+              work assignments.
             </p>
           </div>
 
@@ -278,6 +500,7 @@ function EmployeeModal({
             type="button"
             className="employees__icon-button"
             onClick={onClose}
+            disabled={saving}
             aria-label="Close form"
           >
             <X size={20} />
@@ -289,6 +512,63 @@ function EmployeeModal({
           onSubmit={handleSubmit}
         >
           <div className="employees__form-grid">
+            {!isEditing && (
+              <div className="employees__form-full">
+                <label>
+                  Employee Account Type *
+                  <select
+                    value={accountMode}
+                    onChange={(event) =>
+                      changeAccountMode(
+                        event.target.value
+                      )
+                    }
+                    disabled={
+                      saving ||
+                      Boolean(createdUserId)
+                    }
+                  >
+                    <option value="existing">
+                      Select Existing User
+                    </option>
+
+                    <option value="new">
+                      Create New User Account
+                    </option>
+                  </select>
+                </label>
+              </div>
+            )}
+
+            {!isEditing &&
+              accountMode === "existing" && (
+                <label className="employees__form-full">
+                  Employee User Account *
+                  <select
+                    name="user"
+                    value={form.user}
+                    onChange={handleChange}
+                    required
+                  >
+                    <option value="">
+                      Select Employee Account
+                    </option>
+
+                    {availableUsers.map(
+                      (user) => (
+                        <option
+                          key={getId(user)}
+                          value={getId(user)}
+                        >
+                          {user.name} (
+                          {user.email})
+                        </option>
+                      )
+                    )}
+                  </select>
+                </label>
+              )}
+
             <label>
               Full Name *
               <input
@@ -297,6 +577,11 @@ function EmployeeModal({
                 onChange={handleChange}
                 maxLength={100}
                 placeholder="Employee name"
+                readOnly={
+                  isEditing ||
+                  accountMode === "existing" ||
+                  Boolean(createdUserId)
+                }
                 required
               />
             </label>
@@ -322,6 +607,15 @@ function EmployeeModal({
                 onChange={handleChange}
                 maxLength={150}
                 placeholder="employee@example.com"
+                readOnly={
+                  isEditing ||
+                  accountMode === "existing" ||
+                  Boolean(createdUserId)
+                }
+                required={
+                  !isEditing &&
+                  accountMode === "new"
+                }
               />
             </label>
 
@@ -332,10 +626,33 @@ function EmployeeModal({
                 name="phone"
                 value={form.phone}
                 onChange={handleChange}
-                maxLength={15}
+                maxLength={10}
                 placeholder="10-digit mobile number"
+                readOnly={
+                  isEditing ||
+                  accountMode === "existing" ||
+                  Boolean(createdUserId)
+                }
               />
             </label>
+
+            {!isEditing &&
+              accountMode === "new" &&
+              !createdUserId && (
+                <label className="employees__form-full">
+                  Account Password *
+                  <input
+                    type="password"
+                    name="password"
+                    value={form.password}
+                    onChange={handleChange}
+                    minLength={12}
+                    autoComplete="new-password"
+                    placeholder="Minimum 12 characters"
+                    required
+                  />
+                </label>
+              )}
 
             <label>
               Department
@@ -344,11 +661,15 @@ function EmployeeModal({
                 value={form.department}
                 onChange={handleChange}
               >
-                {DEPARTMENTS.map((department) => (
-                  <option key={department}>
-                    {department}
-                  </option>
-                ))}
+                {DEPARTMENTS.map(
+                  (department) => (
+                    <option
+                      key={department}
+                    >
+                      {department}
+                    </option>
+                  )
+                )}
               </select>
             </label>
 
@@ -359,9 +680,13 @@ function EmployeeModal({
                 value={form.employmentType}
                 onChange={handleChange}
               >
-                {EMPLOYMENT_TYPES.map((type) => (
-                  <option key={type}>{type}</option>
-                ))}
+                {EMPLOYMENT_TYPES.map(
+                  (type) => (
+                    <option key={type}>
+                      {type}
+                    </option>
+                  )
+                )}
               </select>
             </label>
 
@@ -371,21 +696,27 @@ function EmployeeModal({
                 name="status"
                 value={form.status}
                 onChange={handleChange}
+                disabled={!isEditing}
               >
-                {STATUSES.map((status) => (
-                  <option key={status}>{status}</option>
-                ))}
+                {STATUSES.map(
+                  (status) => (
+                    <option key={status}>
+                      {status}
+                    </option>
+                  )
+                )}
               </select>
             </label>
 
             <label>
-              Joining Date
+              Joining Date *
               <input
                 type="date"
                 name="joiningDate"
                 value={form.joiningDate}
                 onChange={handleChange}
                 max={todayKey()}
+                required
               />
             </label>
 
@@ -397,7 +728,7 @@ function EmployeeModal({
                 value={form.monthlySalary}
                 onChange={handleChange}
                 min="0"
-                max="100000000"
+                max="999999999999"
                 step="0.01"
                 placeholder="25000"
               />
@@ -406,26 +737,18 @@ function EmployeeModal({
             <label>
               Assigned Projects
               <input
-                type="number"
-                name="assignedProjects"
-                value={form.assignedProjects}
-                onChange={handleChange}
-                min="0"
-                step="1"
-                placeholder="0"
+                type="text"
+                value="Managed from Projects"
+                readOnly
               />
             </label>
 
             <label>
               Assigned Tasks
               <input
-                type="number"
-                name="assignedTasks"
-                value={form.assignedTasks}
-                onChange={handleChange}
-                min="0"
-                step="1"
-                placeholder="0"
+                type="text"
+                value="Managed from Tasks"
+                readOnly
               />
             </label>
 
@@ -442,6 +765,27 @@ function EmployeeModal({
             </label>
           </div>
 
+          {!isEditing &&
+            accountMode === "existing" &&
+            availableUsers.length === 0 && (
+              <p
+                className="employees__form-error"
+                role="status"
+              >
+                No available employee user
+                accounts. Select Create New
+                User Account instead.
+              </p>
+            )}
+
+          {createdUserId && (
+            <p role="status">
+              User account created. If
+              employee saving fails, retry
+              will reuse this account.
+            </p>
+          )}
+
           {error && (
             <p
               className="employees__form-error"
@@ -456,6 +800,7 @@ function EmployeeModal({
               type="button"
               className="employees__button employees__button--secondary"
               onClick={onClose}
+              disabled={saving}
             >
               Cancel
             </button>
@@ -463,10 +808,19 @@ function EmployeeModal({
             <button
               type="submit"
               className="employees__button employees__button--primary"
+              disabled={
+                saving ||
+                (!isEditing &&
+                  accountMode ===
+                    "existing" &&
+                  availableUsers.length === 0)
+              }
             >
-              {employee
-                ? "Save Changes"
-                : "Add Employee"}
+              {saving
+                ? "Saving..."
+                : isEditing
+                  ? "Save Changes"
+                  : "Add Employee"}
             </button>
           </div>
         </form>
@@ -475,154 +829,453 @@ function EmployeeModal({
   );
 }
 
+// ======================================
+// Employees Page
+// ======================================
+
 export default function Employees() {
   const [employees, setEmployees] =
-    useState(readEmployees);
+    useState([]);
 
-  const [search, setSearch] = useState("");
-  const [departmentFilter, setDepartmentFilter] =
-    useState("All");
-  const [statusFilter, setStatusFilter] =
-    useState("All");
-  const [editingEmployee, setEditingEmployee] =
-    useState(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [storageError, setStorageError] =
+  const [search, setSearch] =
     useState("");
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(employees)
-      );
-      setStorageError("");
-    } catch {
-      setStorageError(
-        "Unable to save employee records in browser storage."
-      );
-    }
-  }, [employees]);
-
-  const stats = useMemo(() => {
-    const active = employees.filter(
-      (employee) => employee.status === "Active"
-    );
-
-    const onLeave = employees.filter(
-      (employee) => employee.status === "On Leave"
-    );
-
-    const monthlyPayroll = employees
-      .filter(
-        (employee) =>
-          employee.status !== "Inactive"
-      )
-      .reduce(
-        (sum, employee) =>
-          sum +
-          (Number(employee.monthlySalary) || 0),
-        0
-      );
-
-    const assignedProjects = employees.reduce(
-      (sum, employee) =>
-        sum +
-        (Number(employee.assignedProjects) || 0),
-      0
-    );
-
-    return {
-      total: employees.length,
-      active: active.length,
-      onLeave: onLeave.length,
-      monthlyPayroll,
-      assignedProjects,
-    };
-  }, [employees]);
-
-  const filteredEmployees = useMemo(() => {
-    const query = search.trim().toLowerCase();
-
-    return employees
-      .filter((employee) => {
-        const matchesSearch = [
-          employee.name,
-          employee.email,
-          employee.phone,
-          employee.role,
-          employee.department,
-        ].some((value) =>
-          String(value ?? "")
-            .toLowerCase()
-            .includes(query)
-        );
-
-        return (
-          matchesSearch &&
-          (departmentFilter === "All" ||
-            employee.department ===
-              departmentFilter) &&
-          (statusFilter === "All" ||
-            employee.status === statusFilter)
-        );
-      })
-      .sort((a, b) =>
-        a.name.localeCompare(b.name)
-      );
-  }, [
-    employees,
-    search,
+  const [
     departmentFilter,
+    setDepartmentFilter,
+  ] = useState("All");
+
+  const [
     statusFilter,
-  ]);
+    setStatusFilter,
+  ] = useState("All");
 
-  const saveEmployee = (form) => {
-    const timestamp = new Date().toISOString();
+  const [
+    editingEmployee,
+    setEditingEmployee,
+  ] = useState(null);
 
-    if (editingEmployee) {
-      setEmployees((previous) =>
-        previous.map((employee) =>
-          employee.id === editingEmployee.id
-            ? {
-                ...employee,
-                ...form,
-                updatedAt: timestamp,
-              }
-            : employee
-        )
+  const [modalOpen, setModalOpen] =
+    useState(false);
+
+  const [
+    availableUsers,
+    setAvailableUsers,
+  ] = useState([]);
+
+  const [
+    storageError,
+    setStorageError,
+  ] = useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [statsData, setStatsData] =
+    useState(null);
+
+  const [
+    totalEmployees,
+    setTotalEmployees,
+  ] = useState(0);
+
+  const [
+    refreshKey,
+    setRefreshKey,
+  ] = useState(0);
+
+  const [busy, setBusy] =
+    useState(false);
+
+  // ====================================
+  // Fetch Employees
+  // ====================================
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadEmployees = async () => {
+      try {
+        setLoading(true);
+        setStorageError("");
+
+        const allEmployees = [];
+        let page = 1;
+        let totalPages = 1;
+
+        do {
+          const result =
+            await employeeApi.getAll({
+              page,
+              limit: PAGE_SIZE,
+            });
+
+          if (cancelled) return;
+
+          allEmployees.push(
+            ...(result.employees || [])
+          );
+
+          totalPages =
+            result.pagination?.totalPages ||
+            1;
+
+          page += 1;
+        } while (page <= totalPages);
+
+        if (cancelled) return;
+
+        setEmployees(
+          allEmployees.map(mapEmployee)
+        );
+
+        setTotalEmployees(
+          allEmployees.length
+        );
+      } catch (err) {
+        if (!cancelled) {
+          setStorageError(
+            getErrorMessage(err)
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadEmployees();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  // ====================================
+  // Fetch Stats
+  // ====================================
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadStats = async () => {
+      try {
+        const result =
+          await employeeApi.getStats();
+
+        if (!cancelled) {
+          setStatsData(
+            result.stats || null
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setStatsData(null);
+        }
+      }
+    };
+
+    void loadStats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  const refreshEmployees =
+    useCallback(() => {
+      setRefreshKey(
+        (value) => value + 1
       );
-    } else {
-      setEmployees((previous) => [
-        {
-          ...form,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
-        ...previous,
-      ]);
+    }, []);
+
+  // ====================================
+  // Add Employee
+  // ====================================
+
+  const openAddEmployee = async () => {
+    try {
+      setStorageError("");
+
+      const result =
+        await employeeApi.getAvailableUsers();
+
+      setAvailableUsers(
+        result.users || []
+      );
+
+      setEditingEmployee(null);
+      setModalOpen(true);
+    } catch (err) {
+      setStorageError(
+        getErrorMessage(err)
+      );
     }
+  };
+
+  const closeModal = () => {
+    if (busy) return;
 
     setModalOpen(false);
     setEditingEmployee(null);
   };
 
-  const deleteEmployee = (employee) => {
+  // ====================================
+  // Save Employee
+  // ====================================
+
+  const saveEmployee = async ({
+    profile,
+    salary,
+    status,
+  }) => {
+    setBusy(true);
+
+    try {
+      if (editingEmployee) {
+        const id =
+          editingEmployee.id;
+
+        await employeeApi.update(
+          id,
+          profile
+        );
+
+        if (salary) {
+          await employeeApi.updateSalary(
+            id,
+            salary
+          );
+        }
+
+        if (
+          status !==
+          editingEmployee.status
+        ) {
+          if (
+            status === "Resigned" ||
+            status === "Terminated"
+          ) {
+            throw new Error(
+              "For Resigned or Terminated status, use the separate exit-date workflow."
+            );
+          }
+
+          await employeeApi.updateStatus(
+            id,
+            status
+          );
+        }
+      } else {
+        await employeeApi.create(
+          profile
+        );
+      }
+
+      setModalOpen(false);
+      setEditingEmployee(null);
+
+      refreshEmployees();
+    } catch (err) {
+      refreshEmployees();
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ====================================
+  // Mark Employee as Resigned
+  // ====================================
+
+  const deleteEmployee = async (
+    employee
+  ) => {
     if (
       !window.confirm(
-        `Delete employee "${employee.name}"?`
+        `Mark "${employee.name}" as resigned?`
       )
     ) {
       return;
     }
 
-    setEmployees((previous) =>
-      previous.filter(
-        (item) => item.id !== employee.id
-      )
+    const exitDate = window.prompt(
+      "Enter exit date (YYYY-MM-DD):",
+      todayKey()
     );
+
+    if (exitDate === null) {
+      return;
+    }
+
+    const date = new Date(
+      `${exitDate}T12:00:00`
+    );
+
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(
+        exitDate
+      ) ||
+      Number.isNaN(
+        date.getTime()
+      ) ||
+      dateInputValue(date) !==
+        exitDate
+    ) {
+      setStorageError(
+        "Invalid exit date."
+      );
+      return;
+    }
+
+    if (
+      employee.joiningDate &&
+      exitDate <
+        employee.joiningDate
+    ) {
+      setStorageError(
+        "Exit date cannot be before joining date."
+      );
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setStorageError("");
+
+      await employeeApi.updateStatus(
+        employee.id,
+        "Resigned",
+        toEmployeeISODate(
+          exitDate
+        )
+      );
+
+      refreshEmployees();
+    } catch (err) {
+      setStorageError(
+        getErrorMessage(err)
+      );
+    } finally {
+      setBusy(false);
+    }
   };
+
+  // ====================================
+  // Statistics
+  // ====================================
+
+  const stats = useMemo(() => {
+    const active = employees.filter(
+      (employee) =>
+        employee.status ===
+        "Active"
+    );
+
+    const onLeave =
+      employees.filter(
+        (employee) =>
+          employee.status ===
+          "On Leave"
+      );
+
+    const monthlyPayroll =
+      employees
+        .filter(
+          (employee) =>
+            ![
+              "Resigned",
+              "Terminated",
+            ].includes(
+              employee.status
+            ) &&
+            employee.salaryType ===
+              "Monthly"
+        )
+        .reduce(
+          (sum, employee) =>
+            sum +
+            (Number(
+              employee.monthlySalary
+            ) || 0),
+          0
+        );
+
+    return {
+      total:
+        statsData?.total ??
+        totalEmployees,
+
+      active:
+        statsData?.active ??
+        active.length,
+
+      onLeave:
+        statsData?.onLeave ??
+        onLeave.length,
+
+      monthlyPayroll,
+
+      assignedProjects: null,
+    };
+  }, [
+    employees,
+    statsData,
+    totalEmployees,
+  ]);
+
+  // ====================================
+  // Search and Filters
+  // ====================================
+
+  const filteredEmployees =
+    useMemo(() => {
+      const query = search
+        .trim()
+        .toLowerCase();
+
+      return employees
+        .filter((employee) => {
+          const matchesSearch = [
+            employee.name,
+            employee.email,
+            employee.phone,
+            employee.role,
+            employee.department,
+          ].some((value) =>
+            String(value ?? "")
+              .toLowerCase()
+              .includes(query)
+          );
+
+          return (
+            matchesSearch &&
+            (departmentFilter ===
+              "All" ||
+              employee.department ===
+                departmentFilter) &&
+            (statusFilter ===
+              "All" ||
+              employee.status ===
+                statusFilter)
+          );
+        })
+        .sort((a, b) =>
+          a.name.localeCompare(
+            b.name
+          )
+        );
+    }, [
+      employees,
+      search,
+      departmentFilter,
+      statusFilter,
+    ]);
+
+  // ====================================
+  // Dashboard Cards
+  // ====================================
 
   const cards = [
     {
@@ -642,15 +1295,27 @@ export default function Employees() {
     },
     {
       label: "Monthly Payroll",
-      value: money(stats.monthlyPayroll),
+      value: employees.some(
+        (employee) =>
+          employee.monthlySalary !==
+          null
+      )
+        ? money(
+            stats.monthlyPayroll
+          )
+        : "—",
       icon: Wallet,
     },
     {
       label: "Assigned Projects",
-      value: stats.assignedProjects,
+      value: "—",
       icon: BriefcaseBusiness,
     },
   ];
+
+  // ====================================
+  // Original UI
+  // ====================================
 
   return (
     <div className="employees">
@@ -659,10 +1324,15 @@ export default function Employees() {
           <span className="employees__eyebrow">
             TEAM MANAGEMENT
           </span>
-          <h1>Employee Management</h1>
+
+          <h1>
+            Employee Management
+          </h1>
+
           <p>
-            Manage employee profiles, departments,
-            salaries and work assignments.
+            Manage employee profiles,
+            departments, salaries and
+            work assignments.
           </p>
         </div>
 
@@ -670,9 +1340,9 @@ export default function Employees() {
           type="button"
           className="employees__button employees__button--primary"
           onClick={() => {
-            setEditingEmployee(null);
-            setModalOpen(true);
+            void openAddEmployee();
           }}
+          disabled={busy}
         >
           <Plus size={18} />
           Add Employee
@@ -680,14 +1350,21 @@ export default function Employees() {
       </div>
 
       {storageError && (
-        <div className="employees__error" role="alert">
+        <div
+          className="employees__error"
+          role="alert"
+        >
           {storageError}
         </div>
       )}
 
       <div className="employees__stats">
         {cards.map(
-          ({ label, value, icon: Icon }) => (
+          ({
+            label,
+            value,
+            icon: Icon,
+          }) => (
             <div
               className="employees__stat"
               key={label}
@@ -707,8 +1384,10 @@ export default function Employees() {
               <Users size={19} />
               Team Directory
             </h2>
+
             <p>
-              Employee profiles and employment details.
+              Employee profiles and
+              employment details.
             </p>
           </div>
         </div>
@@ -716,11 +1395,14 @@ export default function Employees() {
         <div className="employees__toolbar">
           <div className="employees__search">
             <Search size={18} />
+
             <input
               type="search"
               value={search}
               onChange={(event) =>
-                setSearch(event.target.value)
+                setSearch(
+                  event.target.value
+                )
               }
               placeholder="Search name, email, role..."
               aria-label="Search employees"
@@ -743,17 +1425,23 @@ export default function Employees() {
                 All Departments
               </option>
 
-              {DEPARTMENTS.map((department) => (
-                <option key={department}>
-                  {department}
-                </option>
-              ))}
+              {DEPARTMENTS.map(
+                (department) => (
+                  <option
+                    key={department}
+                  >
+                    {department}
+                  </option>
+                )
+              )}
             </select>
 
             <select
               value={statusFilter}
               onChange={(event) =>
-                setStatusFilter(event.target.value)
+                setStatusFilter(
+                  event.target.value
+                )
               }
               aria-label="Filter employment status"
             >
@@ -761,11 +1449,15 @@ export default function Employees() {
                 All Statuses
               </option>
 
-              {STATUSES.map((status) => (
-                <option key={status}>
-                  {status}
-                </option>
-              ))}
+              {STATUSES.map(
+                (status) => (
+                  <option
+                    key={status}
+                  >
+                    {status}
+                  </option>
+                )
+              )}
             </select>
           </div>
         </div>
@@ -775,10 +1467,14 @@ export default function Employees() {
             <thead>
               <tr>
                 <th>Employee</th>
-                <th>Role / Department</th>
+                <th>
+                  Role / Department
+                </th>
                 <th>Employment</th>
                 <th>Joining Date</th>
-                <th>Monthly Salary</th>
+                <th>
+                  Monthly Salary
+                </th>
                 <th>Projects</th>
                 <th>Tasks</th>
                 <th>Status</th>
@@ -787,156 +1483,220 @@ export default function Employees() {
             </thead>
 
             <tbody>
-              {filteredEmployees.map((employee) => (
-                <tr key={employee.id}>
-                  <td>
-                    <div className="employees__identity">
-                      <span className="employees__avatar">
-                        <UserRound size={19} />
-                      </span>
+              {filteredEmployees.map(
+                (employee) => (
+                  <tr
+                    key={employee.id}
+                  >
+                    <td>
+                      <div className="employees__identity">
+                        <span className="employees__avatar">
+                          <UserRound
+                            size={19}
+                          />
+                        </span>
 
-                      <div>
+                        <div>
+                          <strong>
+                            {employee.name}
+                          </strong>
+
+                          {employee.email && (
+                            <a
+                              href={`mailto:${employee.email}`}
+                            >
+                              <Mail
+                                size={12}
+                              />
+                              {
+                                employee.email
+                              }
+                            </a>
+                          )}
+
+                          {employee.phone && (
+                            <a
+                              href={`tel:${employee.phone}`}
+                            >
+                              <Phone
+                                size={12}
+                              />
+                              {
+                                employee.phone
+                              }
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+
+                    <td>
+                      <div className="employees__role">
                         <strong>
-                          {employee.name}
+                          {employee.role}
                         </strong>
 
-                        {employee.email && (
-                          <a
-                            href={`mailto:${employee.email}`}
-                          >
-                            <Mail size={12} />
-                            {employee.email}
-                          </a>
-                        )}
-
-                        {employee.phone && (
-                          <a
-                            href={`tel:+91${employee.phone}`}
-                          >
-                            <Phone size={12} />
-                            {employee.phone}
-                          </a>
-                        )}
+                        <small>
+                          <Building2
+                            size={12}
+                          />
+                          {
+                            employee.department
+                          }
+                        </small>
                       </div>
-                    </div>
-                  </td>
+                    </td>
 
-                  <td>
-                    <div className="employees__role">
-                      <strong>
-                        {employee.role}
-                      </strong>
-                      <small>
-                        <Building2 size={12} />
-                        {employee.department}
-                      </small>
-                    </div>
-                  </td>
+                    <td>
+                      {
+                        employee.employmentType
+                      }
+                    </td>
 
-                  <td>
-                    {employee.employmentType}
-                  </td>
+                    <td>
+                      <span className="employees__date">
+                        <CalendarDays
+                          size={14}
+                        />
+                        {formatDate(
+                          employee.joiningDate
+                        )}
+                      </span>
+                    </td>
 
-                  <td>
-                    <span className="employees__date">
-                      <CalendarDays size={14} />
-                      {formatDate(
-                        employee.joiningDate
-                      )}
-                    </span>
-                  </td>
+                    <td className="employees__salary">
+                      {employee.monthlySalary ===
+                      null
+                        ? "—"
+                        : money(
+                            employee.monthlySalary
+                          )}
+                    </td>
 
-                  <td className="employees__salary">
-                    {money(
-                      employee.monthlySalary
-                    )}
-                  </td>
+                    <td>
+                      <span className="employees__count">
+                        <BriefcaseBusiness
+                          size={14}
+                        />
+                        —
+                      </span>
+                    </td>
 
-                  <td>
-                    <span className="employees__count">
-                      <BriefcaseBusiness size={14} />
-                      {employee.assignedProjects || 0}
-                    </span>
-                  </td>
+                    <td>
+                      <span className="employees__count">
+                        <ClipboardList
+                          size={14}
+                        />
+                        —
+                      </span>
+                    </td>
 
-                  <td>
-                    <span className="employees__count">
-                      <ClipboardList size={14} />
-                      {employee.assignedTasks || 0}
-                    </span>
-                  </td>
-
-                  <td>
-                    <span
-                      className={`employees__badge employees__badge--${employee.status
-                        .toLowerCase()
-                        .replace(/\s+/g, "-")}`}
-                    >
-                      {employee.status}
-                    </span>
-                  </td>
-
-                  <td>
-                    <div className="employees__actions">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingEmployee(
-                            employee
-                          );
-                          setModalOpen(true);
-                        }}
-                        title="Edit employee"
-                        aria-label={`Edit ${employee.name}`}
+                    <td>
+                      <span
+                        className={`employees__badge employees__badge--${employee.status
+                          .toLowerCase()
+                          .replace(
+                            /\s+/g,
+                            "-"
+                          )}`}
                       >
-                        <Pencil size={16} />
-                      </button>
-
-                      <button
-                        type="button"
-                        className="employees__delete"
-                        onClick={() =>
-                          deleteEmployee(employee)
+                        {
+                          employee.status
                         }
-                        title="Delete employee"
-                        aria-label={`Delete ${employee.name}`}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                      </span>
+                    </td>
 
-              {filteredEmployees.length === 0 && (
+                    <td>
+                      <div className="employees__actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingEmployee(
+                              employee
+                            );
+                            setModalOpen(
+                              true
+                            );
+                          }}
+                          title="Edit employee"
+                          aria-label={`Edit ${employee.name}`}
+                          disabled={busy}
+                        >
+                          <Pencil
+                            size={16}
+                          />
+                        </button>
+
+                        <button
+                          type="button"
+                          className="employees__delete"
+                          onClick={() => {
+                            void deleteEmployee(
+                              employee
+                            );
+                          }}
+                          title="Mark as resigned"
+                          aria-label={`Mark ${employee.name} as resigned`}
+                          disabled={
+                            busy ||
+                            [
+                              "Resigned",
+                              "Terminated",
+                            ].includes(
+                              employee.status
+                            )
+                          }
+                        >
+                          <Trash2
+                            size={16}
+                          />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              )}
+
+              {filteredEmployees.length ===
+                0 && (
                 <tr>
                   <td colSpan={9}>
                     <div className="employees__empty">
-                      <Users size={36} />
+                      <Users
+                        size={36}
+                      />
+
                       <h3>
-                        No employees found
+                        {loading
+                          ? "Loading employees..."
+                          : "No employees found"}
                       </h3>
+
                       <p>
-                        {employees.length === 0
-                          ? "Add your first employee to build the team directory."
-                          : "Try adjusting your search or filters."}
+                        {loading
+                          ? "Fetching employee records from the backend."
+                          : employees.length ===
+                              0
+                            ? "Add your first employee to build the team directory."
+                            : "Try adjusting your search or filters."}
                       </p>
 
-                      {employees.length === 0 && (
-                        <button
-                          type="button"
-                          className="employees__button employees__button--primary"
-                          onClick={() => {
-                            setEditingEmployee(
-                              null
-                            );
-                            setModalOpen(true);
-                          }}
-                        >
-                          <Plus size={16} />
-                          Add Employee
-                        </button>
-                      )}
+                      {!loading &&
+                        employees.length ===
+                          0 && (
+                          <button
+                            type="button"
+                            className="employees__button employees__button--primary"
+                            onClick={() => {
+                              void openAddEmployee();
+                            }}
+                          >
+                            <Plus
+                              size={16}
+                            />
+                            Add Employee
+                          </button>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -946,19 +1706,29 @@ export default function Employees() {
         </div>
 
         <div className="employees__table-footer">
-          Showing {filteredEmployees.length} of{" "}
-          {employees.length} employees
+          Showing{" "}
+          {
+            filteredEmployees.length
+          }{" "}
+          of {totalEmployees}{" "}
+          employees
         </div>
       </section>
 
       {modalOpen && (
         <EmployeeModal
-          employee={editingEmployee}
-          onClose={() => {
-            setModalOpen(false);
-            setEditingEmployee(null);
-          }}
-          onSave={saveEmployee}
+          employee={
+            editingEmployee
+          }
+          availableUsers={
+            availableUsers
+          }
+          onClose={
+            closeModal
+          }
+          onSave={
+            saveEmployee
+          }
         />
       )}
     </div>

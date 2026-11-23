@@ -10,6 +10,7 @@ import cookieParser from "cookie-parser";
 // ======================================
 
 import authRoutes from "./routes/authRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
 import clientRoutes from "./routes/clientRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 import callRoutes from "./routes/callRoutes.js";
@@ -199,6 +200,15 @@ businessRouter.use(protect);
 // valid session-bound CSRF tokens.
 
 businessRouter.use(csrfProtection);
+
+// ======================================
+// User Management Routes
+// ======================================
+
+businessRouter.use(
+  "/users",
+  userRoutes
+);
 
 // ======================================
 // Client Management Routes
